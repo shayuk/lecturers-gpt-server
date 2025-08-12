@@ -1,0 +1,73 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Lecturers GPT Gateway",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://YOUR-RENDER-URL.onrender.com"
+    }
+  ],
+  "paths": {
+    "/api/ask": {
+      "post": {
+        "operationId": "askAPI",
+        "summary": "Ask the university GPT with email gating and logging",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": [
+                  "email",
+                  "prompt"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Model answer and token usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "answer": {
+                      "type": "string"
+                    },
+                    "usage": {
+                      "type": "object"
+                    },
+                    "model": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Email not authorized"
+          }
+        }
+      }
+    }
+  }
+}
