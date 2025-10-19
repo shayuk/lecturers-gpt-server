@@ -6,7 +6,7 @@
   },
   "servers": [
     {
-      "url": "https://YOUR-RENDER-URL.onrender.com"
+      "url": "https://lecturers-gpt-server.onrender.com"
     }
   ],
   "paths": {
@@ -23,20 +23,29 @@
                 "properties": {
                   "email": {
                     "type": "string",
-                    "format": "email"
+                    "format": "email",
+                    "default": "shayuk@ariel.ac.il",
+                    "description": "Requester email for authorization"
                   },
                   "prompt": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "User question/prompt"
                   },
                   "meta": {
                     "type": "object",
-                    "additionalProperties": true
+                    "additionalProperties": true,
+                    "description": "Optional metadata"
                   }
                 },
-                "required": [
-                  "email",
-                  "prompt"
-                ]
+                "required": ["email", "prompt"]
+              },
+              "examples": {
+                "basic": {
+                  "value": {
+                    "email": "shayuk@ariel.ac.il",
+                    "prompt": "מהו ההסבר הגרפי למבחן t למדגמים תלויים?"
+                  }
+                }
               }
             }
           }
@@ -49,15 +58,9 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "answer": {
-                      "type": "string"
-                    },
-                    "usage": {
-                      "type": "object"
-                    },
-                    "model": {
-                      "type": "string"
-                    }
+                    "answer": { "type": "string" },
+                    "usage": { "type": "object" },
+                    "model": { "type": "string" }
                   }
                 }
               }
