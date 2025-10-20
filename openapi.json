@@ -1,14 +1,7 @@
 {
   "openapi": "3.1.0",
-  "info": {
-    "title": "Lecturers GPT Gateway",
-    "version": "1.0.0"
-  },
-  "servers": [
-    {
-      "url": "https://lecturers-gpt-server.onrender.com"
-    }
-  ],
+  "info": { "title": "Lecturers GPT Gateway", "version": "1.0.0" },
+  "servers": [{ "url": "https://lecturers-gpt-server.onrender.com" }],
   "paths": {
     "/api/ask": {
       "post": {
@@ -24,17 +17,16 @@
                   "email": {
                     "type": "string",
                     "format": "email",
-                    "default": "shayuk@ariel.ac.il",
                     "description": "Requester email for authorization"
                   },
                   "prompt": {
                     "type": "string",
-                    "description": "User question/prompt"
+                    "description": "User question (auto-filled from last user message)"
                   },
                   "meta": {
                     "type": "object",
                     "additionalProperties": true,
-                    "description": "Optional metadata"
+                    "description": "Optional metadata (won't affect answer)"
                   }
                 },
                 "required": ["email", "prompt"]
@@ -66,9 +58,7 @@
               }
             }
           },
-          "403": {
-            "description": "Email not authorized"
-          }
+          "403": { "description": "Email not authorized" }
         }
       }
     }
