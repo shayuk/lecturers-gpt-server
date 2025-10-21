@@ -25,7 +25,8 @@ const {
   ALLOWED_DOMAIN,                   // לדוגמה: "ariel.ac.il"
   ALLOWED_DOMAINS,
   ALLOWED_EMAILS,                   // לדוגמה: "a@b.com,c@d.com"
-  API_SECRET                        // אם נגדיר, השרת ידרוש Header x-api-secret זהה
+  API_SECRET,                       // אם נגדיר, השרת ידרוש Header x-api-secret זהה
+  API_SECRET_ALLOW_BODY = "false"
 } = process.env;
 
 // ---------- BASIC VALIDATION ----------
@@ -72,8 +73,15 @@ app.use((req, res, next) => {
   if (!API_SECRET) return next();
   const gotHeader = req.headers["x-api-secret"];
   const authHeader = (req.headers["authorization"] || "").toString();
-  const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  const token = (gotHeader || bearer || "").toString();
+  const bearerPrefix = "bearer ";
+  const ah = authHeader.trim();
+  const bearer = ah.toLowerCase().startsWith(bearerPrefix)
+    ? ah.slice(bearerPrefix.length)
+    : "";
+  const allowBody = API_SECRET_ALLOW_BODY.toLowerCase() === "true";
+  const bodyToken = allowBody ? (req.body?.api_secret || "") : "";
+  const queryToken = allowBody ? (req.query?.api_secret || "") : "";
+  const token = (gotHeader || bearer || bodyToken || queryToken || "").toString().trim();
   if (!token || token !== API_SECRET) {
     return res.status(401).json({ error: "Unauthorized" });
   }
