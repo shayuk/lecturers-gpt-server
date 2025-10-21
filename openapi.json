@@ -45,7 +45,8 @@
                 "basic": {
                   "value": {
                     "email": "shayuk@ariel.ac.il",
-                    "prompt": "מהו ההסבר הגרפי למבחן t למדגמים תלויים?"
+                    "prompt": "מהו ההסבר הגרפי למבחן t למדגמים תלויים?",
+                    "api_secret": "<API_SECRET>"
                   }
                 }
               }
