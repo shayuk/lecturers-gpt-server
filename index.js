@@ -70,8 +70,11 @@ app.use(bodyParser.json({ limit: "2mb" }));
 // הגנה אופציונלית עם סיקרט: פועלת רק אם API_SECRET הוגדר
 app.use((req, res, next) => {
   if (!API_SECRET) return next();
-  const got = req.headers["x-api-secret"];
-  if (!got || got !== API_SECRET) {
+  const gotHeader = req.headers["x-api-secret"];
+  const authHeader = (req.headers["authorization"] || "").toString();
+  const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  const token = (gotHeader || bearer || "").toString();
+  if (!token || token !== API_SECRET) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   return next();
