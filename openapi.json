@@ -2,6 +2,9 @@
   "openapi": "3.1.0",
   "info": { "title": "Lecturers GPT Gateway", "version": "1.0.0" },
   "servers": [{ "url": "https://lecturers-gpt-server.onrender.com" }],
+  "security": [
+    { "bearerAuth": [] }
+  ],
   "paths": {
     "/api/ask": {
       "post": {
