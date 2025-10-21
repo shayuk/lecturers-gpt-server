@@ -11,16 +11,22 @@ import OpenAI from "openai";
 // ---------- ENV ----------
 const {
   PORT = 3000,
+  // OpenAI
   OPENAI_API_KEY,
   OPENAI_MODEL = "gpt-4o-mini",
+
+  // Firebase Admin (אותו פרויקט של Authentication עם המשתמשים!)
   FIREBASE_PROJECT_ID,
   FIREBASE_CLIENT_EMAIL,
   FIREBASE_PRIVATE_KEY,
-  BYPASS_AUTH = "false",
-  ALLOWED_DOMAIN,
+
+  // Gating + דיבוג
+  BYPASS_AUTH = "false",            // "true" רק לבדיקה
+  ALLOWED_DOMAIN,                   // לדוגמה: "ariel.ac.il"
   ALLOWED_DOMAINS,
-  ALLOWED_EMAILS,
-  API_SECRET,
+  ALLOWED_EMAILS,                   // לדוגמה: "a@b.com,c@d.com"
+  API_SECRET,                       // אם נגדיר, השרת ידרוש Header x-api-secret זהה
+  API_SECRET_ALLOW_BODY = "false"
 } = process.env;
 
 // ---------- BASIC VALIDATION ----------
@@ -34,6 +40,7 @@ if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY) {
 // ---------- FIREBASE ADMIN INIT ----------
 let firebaseApp;
 try {
+  // Render/ENV מדביקים private_key עם \n כתווים, מחזירים לשורות אמיתיות:
   const pk = FIREBASE_PRIVATE_KEY
     ? FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
     : undefined;
@@ -61,23 +68,23 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: "2mb" }));
 
-// ✅ עדכון כאן — תומך גם ב־Authorization: Bearer
+// הגנה אופציונלית עם סיקרט: פועלת רק אם API_SECRET הוגדר
 app.use((req, res, next) => {
   if (!API_SECRET) return next();
-
   const gotHeader = req.headers["x-api-secret"];
-  const authHeader = req.headers["authorization"];
-  const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-  const passed = gotHeader === API_SECRET || bearer === API_SECRET;
-
-  if (!passed) {
-    return res.status(401).json({
-      error: "Unauthorized",
-      hint: "Missing or incorrect API_SECRET (x-api-secret or Authorization: Bearer)",
-    });
+  const authHeader = (req.headers["authorization"] || "").toString();
+  const bearerPrefix = "bearer ";
+  const ah = authHeader.trim();
+  const bearer = ah.toLowerCase().startsWith(bearerPrefix)
+    ? ah.slice(bearerPrefix.length)
+    : "";
+  const allowBody = API_SECRET_ALLOW_BODY.toLowerCase() === "true";
+  const bodyToken = allowBody ? (req.body?.api_secret || "") : "";
+  const queryToken = allowBody ? (req.query?.api_secret || "") : "";
+  const token = (gotHeader || bearer || bodyToken || queryToken || "").toString().trim();
+  if (!token || token !== API_SECRET) {
+    return res.status(401).json({ error: "Unauthorized" });
   }
-
   return next();
 });
 
@@ -90,15 +97,23 @@ app.get("/", (_req, res) => {
 app.post("/api/ask", async (req, res) => {
   try {
     const rawEmail = (req.body?.email || "").toString().trim().toLowerCase();
+
+    // prompt מה-Body או מה-Header (Fallback):
     const promptFromBody = (req.body?.prompt || "").toString().trim();
     const promptFromHeader = (req.headers["x-gpt-user-message"] || "").toString().trim();
     const prompt = promptFromBody || promptFromHeader;
 
-    if (!rawEmail) return res.status(400).json({ error: "email is required" });
-    if (!prompt) return res.status(400).json({ error: "prompt is required" });
+    if (!rawEmail) {
+      return res.status(400).json({ error: "email is required" });
+    }
+    if (!prompt) {
+      return res.status(400).json({ error: "prompt is required" });
+    }
 
+    // --- אימות / ניתוב ---
     const bypass = BYPASS_AUTH.toLowerCase() === "true";
 
+    // 1) סינון דומיין / רשימה מפורשת
     if (!bypass) {
       const emailDomain = rawEmail.split("@")[1] || "";
       const allowedDomains = (
@@ -134,6 +149,7 @@ app.post("/api/ask", async (req, res) => {
       }
     }
 
+    // 2) אימות קיום משתמש ב-Firebase Authentication
     if (!bypass) {
       if (!admin.apps.length) {
         return res.status(500).json({ error: "Firebase not initialized" });
@@ -180,6 +196,7 @@ app.post("/api/ask", async (req, res) => {
       }
     }
 
+    // --- קריאה ל-OpenAI ---
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: [{ role: "user", content: prompt }],
@@ -189,6 +206,7 @@ app.post("/api/ask", async (req, res) => {
     const answer =
       completion?.choices?.[0]?.message?.content?.trim() || "";
 
+    // --- לוג שימוש (best-effort) ---
     try {
       if (db) {
         await db.collection("usage_logs").add({
