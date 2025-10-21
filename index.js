@@ -121,13 +121,15 @@ app.post("/api/ask", async (req, res) => {
         : true;
 
       if (!domainOk && !listOk) {
-        // לוג אבטחה best-effort
         try {
           if (db) {
             await db.collection("security_logs").add({
-              type: "blocked_email",
+              type: "forbidden_domain",
               email: rawEmail,
-              reason: "not in allowed domain/emails",
+              emailDomain,
+              allowedDomains,
+              domainOk,
+              listOk,
               ts: admin.firestore.FieldValue.serverTimestamp(),
             });
           }
@@ -142,7 +144,32 @@ app.post("/api/ask", async (req, res) => {
         return res.status(500).json({ error: "Firebase not initialized" });
       }
       try {
-        await admin.auth().getUserByEmail(rawEmail);
+        const user = await admin.auth().getUserByEmail(rawEmail);
+        const rolesEnv = (
+          (process.env.ALLOWED_ROLES || process.env.REQUIRED_ROLE || "")
+        )
+          .split(",")
+          .map(s => s.trim().toLowerCase())
+          .filter(Boolean);
+
+        if (rolesEnv.length) {
+          const userRole = ((user.customClaims && user.customClaims.role) || "").toLowerCase();
+          const roleOk = rolesEnv.includes(userRole);
+          if (!roleOk) {
+            try {
+              if (db) {
+                await db.collection("security_logs").add({
+                  type: "forbidden_role",
+                  email: rawEmail,
+                  role: userRole || null,
+                  allowedRoles: rolesEnv,
+                  ts: admin.firestore.FieldValue.serverTimestamp(),
+                });
+              }
+            } catch (_) {}
+            return res.status(403).json({ error: "Role not authorized" });
+          }
+        }
       } catch (err) {
         try {
           if (db) {
