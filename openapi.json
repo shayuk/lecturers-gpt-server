@@ -7,6 +7,26 @@
       "post": {
         "operationId": "askAPI",
         "summary": "Ask the university GPT with email gating and logging",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Optional bearer token: 'Bearer <API_SECRET>'"
+          },
+          {
+            "name": "x-api-secret",
+            "in": "header",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Optional API secret header"
+          }
+        ],
+        "security": [
+          { "bearerAuth": [] },
+          { "xApiSecret": [] }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -58,9 +78,17 @@
               }
             }
           },
+          "401": { "description": "Unauthorized (missing or invalid API secret)" },
           "403": { "description": "Email not authorized" }
         }
       }
+    }
+  }
+  ,
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer" },
+      "xApiSecret": { "type": "apiKey", "in": "header", "name": "x-api-secret" }
     }
   }
 }
