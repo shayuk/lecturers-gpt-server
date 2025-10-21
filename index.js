@@ -23,6 +23,7 @@ const {
   // Gating + דיבוג
   BYPASS_AUTH = "false",            // "true" רק לבדיקה
   ALLOWED_DOMAIN,                   // לדוגמה: "ariel.ac.il"
+  ALLOWED_DOMAINS,
   ALLOWED_EMAILS,                   // לדוגמה: "a@b.com,c@d.com"
   API_SECRET                        // אם נגדיר, השרת ידרוש Header x-api-secret זהה
 } = process.env;
@@ -103,7 +104,18 @@ app.post("/api/ask", async (req, res) => {
 
     // 1) סינון דומיין / רשימה מפורשת
     if (!bypass) {
-      const domainOk = ALLOWED_DOMAIN ? rawEmail.endsWith("@" + ALLOWED_DOMAIN) : true;
+      const emailDomain = rawEmail.split("@")[1] || "";
+      const allowedDomains = (
+        (ALLOWED_DOMAINS || ALLOWED_DOMAIN || "")
+      )
+        .split(",")
+        .map(s => s.trim().toLowerCase())
+        .filter(Boolean);
+
+      const domainOk = allowedDomains.length
+        ? allowedDomains.some(d => emailDomain === d || emailDomain.endsWith("." + d))
+        : true;
+
       const listOk = ALLOWED_EMAILS
         ? ALLOWED_EMAILS.split(",").map(s => s.trim().toLowerCase()).includes(rawEmail)
         : true;
