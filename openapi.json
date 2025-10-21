@@ -26,6 +26,10 @@
                     "type": "string",
                     "description": "User question (auto-filled from last user message)"
                   },
+                  "api_secret": {
+                    "type": "string",
+                    "description": "Optional API secret for auth when body-based secret is enabled"
+                  },
                   "meta": {
                     "type": "object",
                     "additionalProperties": true,
