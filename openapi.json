@@ -2,17 +2,11 @@
   "openapi": "3.1.0",
   "info": { "title": "Lecturers GPT Gateway", "version": "1.0.0" },
   "servers": [{ "url": "https://lecturers-gpt-server.onrender.com" }],
-  "security": [
-    { "bearerAuth": [] }
-  ],
   "paths": {
     "/api/ask": {
       "post": {
         "operationId": "askAPI",
         "summary": "Ask the university GPT with email gating and logging",
-        "security": [
-          { "bearerAuth": [] }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -29,10 +23,6 @@
                     "type": "string",
                     "description": "User question (auto-filled from last user message)"
                   },
-                  "api_secret": {
-                    "type": "string",
-                    "description": "Optional API secret for auth when body-based secret is enabled"
-                  },
                   "meta": {
                     "type": "object",
                     "additionalProperties": true,
@@ -40,15 +30,6 @@
                   }
                 },
                 "required": ["email", "prompt"]
-              },
-              "examples": {
-                "basic": {
-                  "value": {
-                    "email": "shayuk@ariel.ac.il",
-                    "prompt": "מהו ההסבר הגרפי למבחן t למדגמים תלויים?",
-                    "api_secret": "<API_SECRET>"
-                  }
-                }
               }
             }
           }
@@ -64,22 +45,16 @@
                     "answer": { "type": "string" },
                     "usage": { "type": "object" },
                     "model": { "type": "string" }
-                  }
+                  },
+                  "required": ["answer"]
                 }
               }
             }
           },
-          "401": { "description": "Unauthorized (missing or invalid API secret)" },
+          "401": { "description": "Unauthorized" },
           "403": { "description": "Email not authorized" }
         }
       }
-    }
-  }
-  ,
-  "components": {
-    "schemas": {},
-    "securitySchemes": {
-      "bearerAuth": { "type": "http", "scheme": "bearer" }
     }
   }
 }
