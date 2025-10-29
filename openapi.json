@@ -1,12 +1,12 @@
 {
   "openapi": "3.1.0",
-  "info": { "title": "Lecturers GPT Gateway", "version": "1.0.0" },
+  "info": { "title": "Lecturers GPT Gateway", "version": "1.1.0" },
   "servers": [{ "url": "https://lecturers-gpt-server.onrender.com" }],
   "paths": {
     "/api/ask": {
       "post": {
         "operationId": "askAPI",
-        "summary": "Ask the university GPT with email gating and logging",
+        "summary": "Ask the university GPT with email gating, logging and first-login flag",
         "requestBody": {
           "required": true,
           "content": {
@@ -36,7 +36,7 @@
         },
         "responses": {
           "200": {
-            "description": "Model answer and token usage",
+            "description": "Model answer, token usage and first-login flag",
             "content": {
               "application/json": {
                 "schema": {
@@ -44,7 +44,8 @@
                   "properties": {
                     "answer": { "type": "string" },
                     "usage": { "type": "object" },
-                    "model": { "type": "string" }
+                    "model": { "type": "string" },
+                    "first_login": { "type": "boolean" }
                   },
                   "required": ["answer"]
                 }
