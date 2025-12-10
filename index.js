@@ -1,6 +1,3 @@
-// index.js
-// שרת ביניים ל-GPTs: אימות מייל בפיירבייס, קריאה ל-OpenAI, ולוגים ל-Firestore.
-
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
@@ -8,8 +5,9 @@ import admin from "firebase-admin";
 import OpenAI from "openai";
 
 // ---------- ENV ----------
+const PORT = process.env.PORT || 3000;
+
 const {
-  PORT = 3000,
   OPENAI_API_KEY,
   OPENAI_MODEL = "gpt-4o-mini",
 
@@ -25,26 +23,22 @@ const {
   API_SECRET_ALLOW_BODY = "false"
 } = process.env;
 
-// ---------- CORS – לתמיכה בדפדפן מול Firebase Hosting ----------
+// ---------- CORS ----------
 const corsOptions = {
-  origin: "*", // לשלב מתקדם: להחליף לכתובת Firebase בלבד
+  origin: "https://lecturers-gpt-auth.web.app", // התאמה ל-Firebase שלך
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "authorization", "x-api-secret"]
 };
 
 const app = express();
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // חשוב בשביל בקשות OPTIONS
-
+app.options("*", cors(corsOptions));
 app.use(bodyParser.json({ limit: "2mb" }));
 
-// ---------- אזהרות על ENV חסר ----------
-if (!OPENAI_API_KEY) {
-  console.warn("[WARN] OPENAI_API_KEY is missing.");
-}
-if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY) {
-  console.warn("[WARN] Firebase Admin ENV is missing.");
-}
+// ---------- WARNINGS ----------
+if (!OPENAI_API_KEY) console.warn("[WARN] Missing OPENAI_API_KEY");
+if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY)
+  console.warn("[WARN] Missing Firebase ENV");
 
 // ---------- FIREBASE ----------
 let firebaseApp;
@@ -57,17 +51,16 @@ try {
       privateKey: pk,
     }),
   });
-  console.log("[OK] Firebase Admin initialized:", FIREBASE_PROJECT_ID);
+  console.log("[OK] Firebase initialized:", FIREBASE_PROJECT_ID);
 } catch (e) {
   console.error("[Firebase Init Error]", e);
 }
-
 const db = admin.apps.length ? admin.firestore() : null;
 
 // ---------- OPENAI ----------
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// ---------- עזר ----------
+// ---------- HELPERS ----------
 function splitCsvLower(v) {
   return (v || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
 }
@@ -82,12 +75,7 @@ async function checkAndMarkFirstLogin(rawEmail) {
   const snap = await ref.get();
   const now = admin.firestore.FieldValue.serverTimestamp();
   if (!snap.exists) {
-    await ref.set({
-      email,
-      created_at: now,
-      last_login_at: now,
-      first_login_seen: false
-    });
+    await ref.set({ email, created_at: now, last_login_at: now, first_login_seen: false });
     return { first_login: true };
   } else {
     await ref.update({ last_login_at: now });
@@ -95,29 +83,25 @@ async function checkAndMarkFirstLogin(rawEmail) {
   }
 }
 
-// ---------- בדיקת חיים ----------
+// ---------- HEALTH CHECK ----------
 app.get("/", (_req, res) => {
   res.json({ ok: true, status: "Lecturers GPT server is running" });
 });
 
-// ---------- הנקודה המרכזית ----------
+// ---------- MAIN ROUTE ----------
 app.post("/api/ask", async (req, res) => {
   try {
-    const rawEmail = (req.body?.email || "").toString().trim().toLowerCase();
-    const promptFromBody = (req.body?.prompt || "").toString().trim();
-    const promptFromHeader = (req.headers["x-gpt-user-message"] || "").toString().trim();
+    const rawEmail = (req.body?.email || "").trim().toLowerCase();
+    const promptFromBody = (req.body?.prompt || "").trim();
+    const promptFromHeader = (req.headers["x-gpt-user-message"] || "").trim();
     const prompt = promptFromBody || promptFromHeader;
 
-    if (!rawEmail) {
-      return res.status(400).json({ error: "email is required" });
-    }
-    if (!prompt) {
-      return res.status(400).json({ error: "prompt is required" });
-    }
+    if (!rawEmail) return res.status(400).json({ error: "email is required" });
+    if (!prompt) return res.status(400).json({ error: "prompt is required" });
 
     const bypass = BYPASS_AUTH.toLowerCase() === "true";
 
-    // בדיקת דומיינים
+    // ----- Domain check -----
     if (!bypass) {
       const emailDomain = emailDomainOf(rawEmail);
       const allowedDomains = splitCsvLower(ALLOWED_DOMAINS || ALLOWED_DOMAIN || "");
@@ -144,28 +128,24 @@ app.post("/api/ask", async (req, res) => {
       }
     }
 
-    // אימות משתמש בפיירבייס
+    // ----- Firebase Auth Check -----
     if (!bypass) {
-      if (!admin.apps.length) {
-        return res.status(500).json({ error: "Firebase not initialized" });
-      }
+      if (!admin.apps.length) return res.status(500).json({ error: "Firebase not initialized" });
       try {
         const user = await admin.auth().getUserByEmail(rawEmail);
         const rolesEnv = splitCsvLower(process.env.ALLOWED_ROLES || process.env.REQUIRED_ROLE || "");
-        if (rolesEnv.length) {
-          const userRole = ((user.customClaims && user.customClaims.role) || "").toLowerCase();
-          if (!rolesEnv.includes(userRole)) {
-            if (db) {
-              await db.collection("security_logs").add({
-                type: "forbidden_role",
-                email: rawEmail,
-                role: userRole || null,
-                allowedRoles: rolesEnv,
-                ts: admin.firestore.FieldValue.serverTimestamp(),
-              });
-            }
-            return res.status(403).json({ error: "Role not authorized" });
+        const userRole = ((user.customClaims && user.customClaims.role) || "").toLowerCase();
+        if (rolesEnv.length && !rolesEnv.includes(userRole)) {
+          if (db) {
+            await db.collection("security_logs").add({
+              type: "forbidden_role",
+              email: rawEmail,
+              role: userRole || null,
+              allowedRoles: rolesEnv,
+              ts: admin.firestore.FieldValue.serverTimestamp(),
+            });
           }
+          return res.status(403).json({ error: "Role not authorized" });
         }
       } catch (err) {
         if (db) {
@@ -182,6 +162,7 @@ app.post("/api/ask", async (req, res) => {
 
     const { first_login } = await checkAndMarkFirstLogin(rawEmail);
 
+    // ----- OpenAI call -----
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: [{ role: "user", content: prompt }],
@@ -190,6 +171,7 @@ app.post("/api/ask", async (req, res) => {
 
     const answer = completion?.choices?.[0]?.message?.content?.trim() || "";
 
+    // ----- Logging -----
     if (db) {
       await db.collection("usage_logs").add({
         email: rawEmail,
@@ -209,13 +191,14 @@ app.post("/api/ask", async (req, res) => {
       model: completion?.model || OPENAI_MODEL,
       first_login
     });
+
   } catch (e) {
     console.error("[/api/ask error]", e);
     return res.status(500).json({ error: "Server error", details: String(e) });
   }
 });
 
-// ---------- הפעלה ----------
+// ---------- START ----------
 app.listen(PORT, () => {
   console.log(`[OK] Server listening on port ${PORT}`);
 });
