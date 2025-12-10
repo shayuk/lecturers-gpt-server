@@ -23,19 +23,20 @@ const {
   API_SECRET_ALLOW_BODY = "false"
 } = process.env;
 
-// ---------- CORS ----------
+// ---------- CORS (חשוב: לפני כל דבר אחר) ----------
 const corsOptions = {
-  origin: "https://lecturers-gpt-auth.web.app", // התאמה ל-Firebase שלך
+  origin: "https://lecturers-gpt-auth.web.app",
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "authorization", "x-api-secret"]
 };
 
 const app = express();
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+app.options("*", cors(corsOptions)); // טיפול ב־OPTIONS מוקדם
+
 app.use(bodyParser.json({ limit: "2mb" }));
 
-// ---------- WARNINGS ----------
+// ---------- אזהרות ----------
 if (!OPENAI_API_KEY) console.warn("[WARN] Missing OPENAI_API_KEY");
 if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY)
   console.warn("[WARN] Missing Firebase ENV");
@@ -60,7 +61,7 @@ const db = admin.apps.length ? admin.firestore() : null;
 // ---------- OPENAI ----------
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// ---------- HELPERS ----------
+// ---------- פונקציות עזר ----------
 function splitCsvLower(v) {
   return (v || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
 }
@@ -83,12 +84,12 @@ async function checkAndMarkFirstLogin(rawEmail) {
   }
 }
 
-// ---------- HEALTH CHECK ----------
+// ---------- בדיקת חיים ----------
 app.get("/", (_req, res) => {
   res.json({ ok: true, status: "Lecturers GPT server is running" });
 });
 
-// ---------- MAIN ROUTE ----------
+// ---------- נקודת API ----------
 app.post("/api/ask", async (req, res) => {
   try {
     const rawEmail = (req.body?.email || "").trim().toLowerCase();
@@ -101,7 +102,7 @@ app.post("/api/ask", async (req, res) => {
 
     const bypass = BYPASS_AUTH.toLowerCase() === "true";
 
-    // ----- Domain check -----
+    // ---------- בדיקת הרשאות ----------
     if (!bypass) {
       const emailDomain = emailDomainOf(rawEmail);
       const allowedDomains = splitCsvLower(ALLOWED_DOMAINS || ALLOWED_DOMAIN || "");
@@ -128,7 +129,7 @@ app.post("/api/ask", async (req, res) => {
       }
     }
 
-    // ----- Firebase Auth Check -----
+    // ---------- בדיקת קיום בפיירבייס ----------
     if (!bypass) {
       if (!admin.apps.length) return res.status(500).json({ error: "Firebase not initialized" });
       try {
@@ -162,7 +163,7 @@ app.post("/api/ask", async (req, res) => {
 
     const { first_login } = await checkAndMarkFirstLogin(rawEmail);
 
-    // ----- OpenAI call -----
+    // ---------- בקשה ל־OpenAI ----------
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: [{ role: "user", content: prompt }],
@@ -171,7 +172,7 @@ app.post("/api/ask", async (req, res) => {
 
     const answer = completion?.choices?.[0]?.message?.content?.trim() || "";
 
-    // ----- Logging -----
+    // ---------- לוג ל־Firestore ----------
     if (db) {
       await db.collection("usage_logs").add({
         email: rawEmail,
@@ -198,7 +199,7 @@ app.post("/api/ask", async (req, res) => {
   }
 });
 
-// ---------- START ----------
+// ---------- הפעלת השרת ----------
 app.listen(PORT, () => {
   console.log(`[OK] Server listening on port ${PORT}`);
 });
