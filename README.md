@@ -28,7 +28,9 @@
 - ודאי ש-Firebase מוגדר נכון (נדרש ל-RAG)
 
 ### שלב 2: העלאת חומרי קורס
-שלחי POST request ל-`/api/upload-course-material`:
+
+#### אפשרות 1: העלאת טקסט ישיר
+שלחי POST request ל-`/api/upload-course-material` עם `Content-Type: application/json`:
 
 ```json
 {
@@ -39,7 +41,38 @@
 }
 ```
 
-השרת יחלק את הטקסט לקטעים, ייצור embeddings עם OpenAI וישמור אותם ב-Firestore.
+#### אפשרות 2: העלאת קובץ PDF
+שלחי POST request ל-`/api/upload-course-material` עם `Content-Type: multipart/form-data`:
+
+- `email`: כתובת המייל
+- `pdf`: קובץ PDF (עד 10MB)
+- `source`: שם המסמך (אופציונלי - יקבע אוטומטית משם הקובץ)
+- `course_name`: שם הקורס (ברירת מחדל: "statistics")
+
+**דוגמה ב-cURL:**
+```bash
+curl -X POST https://your-server.com/api/upload-course-material \
+  -F "email=your-email@ariel.ac.il" \
+  -F "pdf=@/path/to/file.pdf" \
+  -F "source=שם המסמך" \
+  -F "course_name=statistics"
+```
+
+**דוגמה ב-JavaScript (fetch):**
+```javascript
+const formData = new FormData();
+formData.append('email', 'your-email@ariel.ac.il');
+formData.append('pdf', fileInput.files[0]);
+formData.append('source', 'שם המסמך');
+formData.append('course_name', 'statistics');
+
+fetch('https://your-server.com/api/upload-course-material', {
+  method: 'POST',
+  body: formData
+});
+```
+
+השרת יחלק את הטקסט (או ימציא טקסט מ-PDF) לקטעים, ייצור embeddings עם OpenAI וישמור אותם ב-Firestore.
 
 ### שימוש
 לאחר העלאת החומרים, הבוט ישתמש בהם אוטומטית בעת מענה על שאלות. התשובות יתבססו על חומרי הקורס שהועלו באמצעות חיפוש similarity ב-Firestore.

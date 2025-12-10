@@ -3,6 +3,8 @@ import cors from "cors";
 import bodyParser from "body-parser";
 import admin from "firebase-admin";
 import OpenAI from "openai";
+import multer from "multer";
+import pdfParse from "pdf-parse";
 import { initRAG, getRAGContext, uploadDocumentToRAG } from "./rag.js";
 
 // ---------- ENV ----------
@@ -72,7 +74,21 @@ app.use((req, res, next) => {
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
-app.use(bodyParser.json({ limit: "2mb" }));
+app.use(bodyParser.json({ limit: "10mb" }));
+app.use(bodyParser.urlencoded({ extended: true, limit: "10mb" }));
+
+// הגדרת multer להעלאת קבצים
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === "application/pdf") {
+      cb(null, true);
+    } else {
+      cb(new Error("Only PDF files are allowed"), false);
+    }
+  },
+});
 
 if (!OPENAI_API_KEY) console.warn("[WARN] Missing OPENAI_API_KEY");
 if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY)
@@ -272,32 +288,56 @@ ${ragContext.context}
   }
 });
 
-// Endpoint להעלאת חומרי קורס ל-RAG
-app.post("/api/upload-course-material", async (req, res) => {
+// פונקציה עזר לבדיקת הרשאות
+function checkUploadAuth(rawEmail, bypass) {
+  if (bypass) return true;
+  
+  const emailDomain = emailDomainOf(rawEmail);
+  const allowedDomains = splitCsvLower(ALLOWED_DOMAINS || ALLOWED_DOMAIN || "");
+  const allowedEmails = splitCsvLower(ALLOWED_EMAILS);
+  const emailInWhitelist = allowedEmails.length && allowedEmails.includes(rawEmail);
+  const domainOk = allowedDomains.length
+    ? allowedDomains.some(d => emailDomain === d || emailDomain.endsWith("." + d))
+    : true;
+
+  return emailInWhitelist || domainOk;
+}
+
+// Endpoint להעלאת חומרי קורס ל-RAG (טקסט או PDF)
+app.post("/api/upload-course-material", upload.single("pdf"), async (req, res) => {
   try {
     const rawEmail = (req.body?.email || "").trim().toLowerCase();
-    const text = (req.body?.text || "").trim();
-    const source = (req.body?.source || "unknown").trim();
+    let text = (req.body?.text || "").trim();
+    let source = (req.body?.source || "unknown").trim();
     const courseName = (req.body?.course_name || "statistics").trim();
 
     if (!rawEmail) return res.status(400).json({ error: "email is required" });
-    if (!text) return res.status(400).json({ error: "text is required" });
     if (!ragEnabled) return res.status(503).json({ error: "RAG is not enabled" });
 
-    // בדיקת הרשאות (אותה לוגיקה כמו ב-/api/ask)
+    // בדיקת הרשאות
     const bypass = BYPASS_AUTH.toLowerCase() === "true";
-    if (!bypass) {
-      const emailDomain = emailDomainOf(rawEmail);
-      const allowedDomains = splitCsvLower(ALLOWED_DOMAINS || ALLOWED_DOMAIN || "");
-      const allowedEmails = splitCsvLower(ALLOWED_EMAILS);
-      const emailInWhitelist = allowedEmails.length && allowedEmails.includes(rawEmail);
-      const domainOk = allowedDomains.length
-        ? allowedDomains.some(d => emailDomain === d || emailDomain.endsWith("." + d))
-        : true;
+    if (!checkUploadAuth(rawEmail, bypass)) {
+      return res.status(403).json({ error: "Email not authorized" });
+    }
 
-      if (!emailInWhitelist && !domainOk) {
-        return res.status(403).json({ error: "Email not authorized" });
+    // עיבוד PDF אם הועלה קובץ
+    if (req.file && req.file.mimetype === "application/pdf") {
+      try {
+        const pdfData = await pdfParse(req.file.buffer);
+        text = pdfData.text;
+        if (!source || source === "unknown") {
+          source = req.file.originalname || "uploaded.pdf";
+        }
+        console.log(`[PDF] Extracted ${text.length} characters from PDF: ${source}`);
+      } catch (pdfError) {
+        console.error("[PDF Parse Error]", pdfError);
+        return res.status(400).json({ error: "Failed to parse PDF", details: String(pdfError) });
       }
+    }
+
+    // בדיקה שיש טקסט לעיבוד
+    if (!text || text.trim().length === 0) {
+      return res.status(400).json({ error: "text is required (or upload a PDF file)" });
     }
 
     // העלאת הטקסט ל-RAG
@@ -306,6 +346,7 @@ app.post("/api/upload-course-material", async (req, res) => {
       course_name: courseName,
       uploaded_by: rawEmail,
       uploaded_at: new Date().toISOString(),
+      file_type: req.file ? "pdf" : "text",
     });
 
     // לוג ב-Firestore
@@ -316,6 +357,7 @@ app.post("/api/upload-course-material", async (req, res) => {
         course_name: courseName,
         text_length: text.length,
         chunks_count: result.chunksCount,
+        file_type: req.file ? "pdf" : "text",
         ts: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
@@ -323,7 +365,9 @@ app.post("/api/upload-course-material", async (req, res) => {
     return res.json({ 
       success: true, 
       chunks_count: result.chunksCount,
-      message: `Uploaded ${result.chunksCount} chunks to RAG database`
+      message: `Uploaded ${result.chunksCount} chunks to RAG database`,
+      source: source,
+      file_type: req.file ? "pdf" : "text"
     });
 
   } catch (e) {
