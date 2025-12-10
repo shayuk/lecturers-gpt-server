@@ -10,11 +10,9 @@ const PORT = process.env.PORT || 3000;
 const {
   OPENAI_API_KEY,
   OPENAI_MODEL = "gpt-4o-mini",
-
   FIREBASE_PROJECT_ID,
   FIREBASE_CLIENT_EMAIL,
   FIREBASE_PRIVATE_KEY,
-
   BYPASS_AUTH = "false",
   ALLOWED_DOMAIN,
   ALLOWED_DOMAINS,
@@ -23,7 +21,6 @@ const {
   API_SECRET_ALLOW_BODY = "false"
 } = process.env;
 
-// ---------- CORS (חשוב: לפני כל דבר אחר) ----------
 const corsOptions = {
   origin: "https://lecturers-gpt-auth.web.app",
   methods: ["GET", "POST", "OPTIONS"],
@@ -32,19 +29,16 @@ const corsOptions = {
 
 const app = express();
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // טיפול ב־OPTIONS מוקדם
-
+app.options("*", cors(corsOptions));
 app.use(bodyParser.json({ limit: "2mb" }));
 
-// ---------- אזהרות ----------
 if (!OPENAI_API_KEY) console.warn("[WARN] Missing OPENAI_API_KEY");
 if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY)
   console.warn("[WARN] Missing Firebase ENV");
 
-// ---------- FIREBASE ----------
 let firebaseApp;
 try {
-  const pk = FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  const pk = FIREBASE_PRIVATE_KEY?.replace(/\n/g, "\n");
   firebaseApp = admin.initializeApp({
     credential: admin.credential.cert({
       projectId: FIREBASE_PROJECT_ID,
@@ -56,12 +50,10 @@ try {
 } catch (e) {
   console.error("[Firebase Init Error]", e);
 }
-const db = admin.apps.length ? admin.firestore() : null;
 
-// ---------- OPENAI ----------
+const db = admin.apps.length ? admin.firestore() : null;
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// ---------- פונקציות עזר ----------
 function splitCsvLower(v) {
   return (v || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
 }
@@ -84,12 +76,10 @@ async function checkAndMarkFirstLogin(rawEmail) {
   }
 }
 
-// ---------- בדיקת חיים ----------
 app.get("/", (_req, res) => {
   res.json({ ok: true, status: "Lecturers GPT server is running" });
 });
 
-// ---------- נקודת API ----------
 app.post("/api/ask", async (req, res) => {
   try {
     const rawEmail = (req.body?.email || "").trim().toLowerCase();
@@ -102,7 +92,6 @@ app.post("/api/ask", async (req, res) => {
 
     const bypass = BYPASS_AUTH.toLowerCase() === "true";
 
-    // ---------- בדיקת הרשאות ----------
     if (!bypass) {
       const emailDomain = emailDomainOf(rawEmail);
       const allowedDomains = splitCsvLower(ALLOWED_DOMAINS || ALLOWED_DOMAIN || "");
@@ -129,7 +118,6 @@ app.post("/api/ask", async (req, res) => {
       }
     }
 
-    // ---------- בדיקת קיום בפיירבייס ----------
     if (!bypass) {
       if (!admin.apps.length) return res.status(500).json({ error: "Firebase not initialized" });
       try {
@@ -163,7 +151,6 @@ app.post("/api/ask", async (req, res) => {
 
     const { first_login } = await checkAndMarkFirstLogin(rawEmail);
 
-    // ---------- בקשה ל־OpenAI ----------
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: [{ role: "user", content: prompt }],
@@ -172,7 +159,6 @@ app.post("/api/ask", async (req, res) => {
 
     const answer = completion?.choices?.[0]?.message?.content?.trim() || "";
 
-    // ---------- לוג ל־Firestore ----------
     if (db) {
       await db.collection("usage_logs").add({
         email: rawEmail,
@@ -186,12 +172,7 @@ app.post("/api/ask", async (req, res) => {
       });
     }
 
-    return res.json({
-      answer,
-      usage: completion?.usage || null,
-      model: completion?.model || OPENAI_MODEL,
-      first_login
-    });
+    return res.json({ answer, usage: completion?.usage || null, model: completion?.model || OPENAI_MODEL, first_login });
 
   } catch (e) {
     console.error("[/api/ask error]", e);
@@ -199,7 +180,6 @@ app.post("/api/ask", async (req, res) => {
   }
 });
 
-// ---------- הפעלת השרת ----------
 app.listen(PORT, () => {
   console.log(`[OK] Server listening on port ${PORT}`);
 });
