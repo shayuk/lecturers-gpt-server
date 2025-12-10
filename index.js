@@ -3,6 +3,7 @@ import cors from "cors";
 import bodyParser from "body-parser";
 import admin from "firebase-admin";
 import OpenAI from "openai";
+import { initRAG, getRAGContext, uploadDocumentToRAG } from "./rag.js";
 
 // ---------- ENV ----------
 const PORT = process.env.PORT || 3000;
@@ -18,7 +19,8 @@ const {
   ALLOWED_DOMAINS,
   ALLOWED_EMAILS,
   API_SECRET,
-  API_SECRET_ALLOW_BODY = "false"
+  API_SECRET_ALLOW_BODY = "false",
+  USE_RAG = "true"
 } = process.env;
 
 function normalizePrivateKey(raw) {
@@ -93,6 +95,17 @@ try {
 
 const db = admin.apps.length ? admin.firestore() : null;
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+// אתחול RAG
+let ragEnabled = false;
+if (USE_RAG.toLowerCase() === "true") {
+  ragEnabled = initRAG(OPENAI_API_KEY, db);
+  if (ragEnabled) {
+    console.log("[OK] RAG enabled with Firestore");
+  } else {
+    console.warn("[WARN] RAG disabled - missing OpenAI API key or Firestore");
+  }
+}
 
 function splitCsvLower(v) {
   return (v || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
@@ -195,9 +208,38 @@ app.post("/api/ask", async (req, res) => {
 
     const { first_login } = await checkAndMarkFirstLogin(rawEmail);
 
+    // שאילתה ב-RAG אם מופעל
+    let ragContext = null;
+    if (ragEnabled) {
+      try {
+        ragContext = await getRAGContext(prompt, 3);
+      } catch (e) {
+        console.error("[RAG Query Error]", e);
+        // ממשיכים גם אם RAG נכשל
+      }
+    }
+
+    // בניית ה-prompt עם context מה-RAG
+    let systemPrompt = "אתה עוזר סטטיסטיקה לסטודנטים. ענה על השאלות בצורה ברורה ומקצועית.";
+    let userMessage = prompt;
+
+    if (ragContext && ragContext.context) {
+      systemPrompt = `אתה עוזר סטטיסטיקה לסטודנטים. השתמש במידע הבא מחומרי הקורס כדי לענות על השאלות בצורה מדויקת ומקצועית.
+
+חומרי הקורס:
+${ragContext.context}
+
+אם המידע בחומרי הקורס לא רלוונטי לשאלה, השתמש בידע הכללי שלך.`;
+
+      userMessage = `שאלה: ${prompt}`;
+    }
+
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
-      messages: [{ role: "user", content: prompt }],
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage }
+      ],
       temperature: 0.2
     });
 
@@ -216,10 +258,76 @@ app.post("/api/ask", async (req, res) => {
       });
     }
 
-    return res.json({ answer, usage: completion?.usage || null, model: completion?.model || OPENAI_MODEL, first_login });
+    return res.json({ 
+      answer, 
+      usage: completion?.usage || null, 
+      model: completion?.model || OPENAI_MODEL, 
+      first_login,
+      rag_sources: ragContext?.sources || null
+    });
 
   } catch (e) {
     console.error("[/api/ask error]", e);
+    return res.status(500).json({ error: "Server error", details: String(e) });
+  }
+});
+
+// Endpoint להעלאת חומרי קורס ל-RAG
+app.post("/api/upload-course-material", async (req, res) => {
+  try {
+    const rawEmail = (req.body?.email || "").trim().toLowerCase();
+    const text = (req.body?.text || "").trim();
+    const source = (req.body?.source || "unknown").trim();
+    const courseName = (req.body?.course_name || "statistics").trim();
+
+    if (!rawEmail) return res.status(400).json({ error: "email is required" });
+    if (!text) return res.status(400).json({ error: "text is required" });
+    if (!ragEnabled) return res.status(503).json({ error: "RAG is not enabled" });
+
+    // בדיקת הרשאות (אותה לוגיקה כמו ב-/api/ask)
+    const bypass = BYPASS_AUTH.toLowerCase() === "true";
+    if (!bypass) {
+      const emailDomain = emailDomainOf(rawEmail);
+      const allowedDomains = splitCsvLower(ALLOWED_DOMAINS || ALLOWED_DOMAIN || "");
+      const allowedEmails = splitCsvLower(ALLOWED_EMAILS);
+      const emailInWhitelist = allowedEmails.length && allowedEmails.includes(rawEmail);
+      const domainOk = allowedDomains.length
+        ? allowedDomains.some(d => emailDomain === d || emailDomain.endsWith("." + d))
+        : true;
+
+      if (!emailInWhitelist && !domainOk) {
+        return res.status(403).json({ error: "Email not authorized" });
+      }
+    }
+
+    // העלאת הטקסט ל-RAG
+    const result = await uploadDocumentToRAG(text, {
+      source,
+      course_name: courseName,
+      uploaded_by: rawEmail,
+      uploaded_at: new Date().toISOString(),
+    });
+
+    // לוג ב-Firestore
+    if (db) {
+      await db.collection("course_materials").add({
+        email: rawEmail,
+        source,
+        course_name: courseName,
+        text_length: text.length,
+        chunks_count: result.chunksCount,
+        ts: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    return res.json({ 
+      success: true, 
+      chunks_count: result.chunksCount,
+      message: `Uploaded ${result.chunksCount} chunks to RAG database`
+    });
+
+  } catch (e) {
+    console.error("[/api/upload-course-material error]", e);
     return res.status(500).json({ error: "Server error", details: String(e) });
   }
 });

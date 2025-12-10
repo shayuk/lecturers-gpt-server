@@ -14,8 +14,35 @@
 - `OPENAI_API_KEY` – מפתח ה־OpenAI שלך.
 - `OPENAI_MODEL` – ברירת מחדל: gpt-4o-mini (אפשר לשנות לדגם אחר שיש לך גישה אליו).
 - `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` – פרטי Service Account.
+- `USE_RAG` – הפעלת RAG (ברירת מחדל: true).
 
 > הערה: ב־Render/Heroku יש לשים לב ש־`FIREBASE_PRIVATE_KEY` מכיל `\n` במקום שורות אמיתיות.
+
+## הגדרת RAG (Retrieval-Augmented Generation)
+
+השרת תומך ב-RAG כדי שהבוט יוכל לשאוב מידע מחומרי הקורס. המערכת משתמשת ב-Firestore לאחסון embeddings (ללא צורך בשירותים חיצוניים נוספים).
+
+### שלב 1: הגדרת משתני סביבה
+הוסיפי ל-Render/Heroku:
+- `USE_RAG` = true (ברירת מחדל)
+- ודאי ש-Firebase מוגדר נכון (נדרש ל-RAG)
+
+### שלב 2: העלאת חומרי קורס
+שלחי POST request ל-`/api/upload-course-material`:
+
+```json
+{
+  "email": "your-email@ariel.ac.il",
+  "text": "תוכן חומרי הקורס כאן...",
+  "source": "שם המסמך/מקור",
+  "course_name": "statistics"
+}
+```
+
+השרת יחלק את הטקסט לקטעים, ייצור embeddings עם OpenAI וישמור אותם ב-Firestore.
+
+### שימוש
+לאחר העלאת החומרים, הבוט ישתמש בהם אוטומטית בעת מענה על שאלות. התשובות יתבססו על חומרי הקורס שהועלו באמצעות חיפוש similarity ב-Firestore.
 
 ## פריסת ענן מהירה (Render)
 1. צרי שירות Web חדש על בסיס GitHub או העלאת קבצים.
