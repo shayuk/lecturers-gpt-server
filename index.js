@@ -135,12 +135,15 @@ app.post("/api/ask", async (req, res) => {
     if (!bypass) {
       const emailDomain = emailDomainOf(rawEmail);
       const allowedDomains = splitCsvLower(ALLOWED_DOMAINS || ALLOWED_DOMAIN || "");
+      const allowedEmails = splitCsvLower(ALLOWED_EMAILS);
+      
       const domainOk = allowedDomains.length
         ? allowedDomains.some(d => emailDomain === d || emailDomain.endsWith("." + d))
         : true;
-
-      const allowedEmails = splitCsvLower(ALLOWED_EMAILS);
       const listOk = allowedEmails.length ? allowedEmails.includes(rawEmail) : true;
+
+      // אם המייל ברשימת ALLOWED_EMAILS, נדלג על בדיקת Firebase Auth
+      const emailInWhitelist = allowedEmails.length && allowedEmails.includes(rawEmail);
 
       if (!domainOk && !listOk) {
         if (db) {
@@ -156,36 +159,37 @@ app.post("/api/ask", async (req, res) => {
         }
         return res.status(403).json({ error: "Email not authorized (domain/list)" });
       }
-    }
 
-    if (!bypass) {
-      if (!admin.apps.length) return res.status(500).json({ error: "Firebase not initialized" });
-      try {
-        const user = await admin.auth().getUserByEmail(rawEmail);
-        const rolesEnv = splitCsvLower(process.env.ALLOWED_ROLES || process.env.REQUIRED_ROLE || "");
-        const userRole = ((user.customClaims && user.customClaims.role) || "").toLowerCase();
-        if (rolesEnv.length && !rolesEnv.includes(userRole)) {
+      // בדיקת Firebase Auth רק אם המייל לא ברשימת ALLOWED_EMAILS
+      if (!emailInWhitelist) {
+        if (!admin.apps.length) return res.status(500).json({ error: "Firebase not initialized" });
+        try {
+          const user = await admin.auth().getUserByEmail(rawEmail);
+          const rolesEnv = splitCsvLower(process.env.ALLOWED_ROLES || process.env.REQUIRED_ROLE || "");
+          const userRole = ((user.customClaims && user.customClaims.role) || "").toLowerCase();
+          if (rolesEnv.length && !rolesEnv.includes(userRole)) {
+            if (db) {
+              await db.collection("security_logs").add({
+                type: "forbidden_role",
+                email: rawEmail,
+                role: userRole || null,
+                allowedRoles: rolesEnv,
+                ts: admin.firestore.FieldValue.serverTimestamp(),
+              });
+            }
+            return res.status(403).json({ error: "Role not authorized" });
+          }
+        } catch (err) {
           if (db) {
             await db.collection("security_logs").add({
-              type: "forbidden_role",
+              type: "auth_not_found",
               email: rawEmail,
-              role: userRole || null,
-              allowedRoles: rolesEnv,
               ts: admin.firestore.FieldValue.serverTimestamp(),
+              err: String(err),
             });
           }
-          return res.status(403).json({ error: "Role not authorized" });
+          return res.status(403).json({ error: "Email not authorized" });
         }
-      } catch (err) {
-        if (db) {
-          await db.collection("security_logs").add({
-            type: "auth_not_found",
-            email: rawEmail,
-            ts: admin.firestore.FieldValue.serverTimestamp(),
-            err: String(err),
-          });
-        }
-        return res.status(403).json({ error: "Email not authorized" });
       }
     }
 
