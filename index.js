@@ -54,6 +54,20 @@ const corsOptions = {
 };
 
 const app = express();
+
+// CORS middleware - מוסיף headers מפורשים
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "https://lecturers-gpt-auth.web.app");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message");
+  res.header("Access-Control-Allow-Credentials", "true");
+  
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 app.use(bodyParser.json({ limit: "2mb" }));
