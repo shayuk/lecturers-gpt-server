@@ -66,12 +66,30 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // ---------- APP ----------
 const app = express();
-app.use(cors());
+
+// ✅ CORS מוגדר בצורה מפורשת, כולל OPTIONS
+const corsOptions = {
+  // אפשר להחליף אח"כ לכתובת הפרודקשן, למשל:
+  // origin: "https://galibot-ui.web.app",
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "authorization", "x-api-secret"],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // לטפל בכל בקשות ה-OPTIONS
+
 app.use(bodyParser.json({ limit: "2mb" }));
 
 // הגנה אופציונלית עם סיקרט: פועלת רק אם API_SECRET הוגדר
 app.use((req, res, next) => {
   if (!API_SECRET) return next();
+
+  // ⚠ חשוב: לא לחסום בקשות OPTIONS (preflight)
+  if (req.method === "OPTIONS") {
+    return next();
+  }
+
   const gotHeader = req.headers["x-api-secret"];
   const authHeader = (req.headers["authorization"] || "").toString();
   const bearerPrefix = "bearer ";
