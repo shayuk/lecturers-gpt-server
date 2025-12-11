@@ -297,19 +297,15 @@ app.post("/api/ask", async (req, res) => {
     }
 
     // בניית ה-prompt עם context מה-RAG
-    let systemPrompt = "אתה עוזר סטטיסטיקה לסטודנטים. ענה על השאלות בצורה ברורה ומקצועית.";
-    let userMessage = prompt;
+    let systemPrompt = `אתה עוזר סטטיסטיקה לסטודנטים בשם גלי-בוט. יש לך גישה למאגר חומרי קורס (RAG database) שמכיל חומרי לימוד שהועלו על ידי המרצים.
 
-    if (ragContext && ragContext.context) {
-      systemPrompt = `אתה עוזר סטטיסטיקה לסטודנטים. השתמש במידע הבא מחומרי הקורס כדי לענות על השאלות בצורה מדויקת ומקצועית.
-
-חומרי הקורס:
+${ragContext && ragContext.context ? `המידע הבא מחומרי הקורס זמין לך:
 ${ragContext.context}
 
-אם המידע בחומרי הקורס לא רלוונטי לשאלה, השתמש בידע הכללי שלך.`;
+השתמש במידע הזה כדי לענות על השאלות בצורה מדויקת ומקצועית.` : 'כרגע אין חומרי קורס זמינים במאגר, אבל אתה יכול לענות על בסיס הידע הכללי שלך.'}
 
-      userMessage = `שאלה: ${prompt}`;
-    }
+אם שואלים אותך על החומרים שיש לך במאגר, ציין את המקורות הרלוונטיים. ענה על השאלות בצורה ברורה ומקצועית.`;
+    let userMessage = prompt;
 
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
