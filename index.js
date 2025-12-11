@@ -80,7 +80,7 @@ app.use(bodyParser.urlencoded({ extended: true, limit: "10mb" }));
 // הגדרת multer להעלאת קבצים
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB per file
   fileFilter: (req, file, cb) => {
     if (file.mimetype === "application/pdf") {
       cb(null, true);
@@ -89,6 +89,30 @@ const upload = multer({
     }
   },
 });
+
+// Error handler ל-multer - צריך להיות middleware נפרד
+const handleMulterError = (err, req, res, next) => {
+  if (err) {
+    if (err instanceof multer.MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return res.status(400).json({ error: "File too large. Maximum size is 10MB per file" });
+      }
+      if (err.code === "LIMIT_FILE_COUNT") {
+        return res.status(400).json({ error: "Too many files. Maximum is 10 files" });
+      }
+      if (err.code === "LIMIT_UNEXPECTED_FILE") {
+        return res.status(400).json({ error: "Unexpected file field. Use 'pdf' field name" });
+      }
+      return res.status(400).json({ error: "File upload error", details: err.message });
+    }
+    // שגיאת fileFilter
+    if (err.message && err.message.includes("Only PDF files")) {
+      return res.status(400).json({ error: "Only PDF files are allowed" });
+    }
+    return res.status(400).json({ error: err.message || "File upload error" });
+  }
+  next();
+};
 
 if (!OPENAI_API_KEY) console.warn("[WARN] Missing OPENAI_API_KEY");
 if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY)
@@ -303,12 +327,18 @@ function checkUploadAuth(rawEmail, bypass) {
   return emailInWhitelist || domainOk;
 }
 
-// Endpoint להעלאת חומרי קורס ל-RAG (טקסט או PDF)
-app.post("/api/upload-course-material", upload.single("pdf"), async (req, res) => {
+// Endpoint להעלאת חומרי קורס ל-RAG (טקסט או PDF - תמיכה בכמה קבצים)
+app.post("/api/upload-course-material", upload.array("pdf", 10), handleMulterError, async (req, res) => {
   try {
+    console.log("[Upload] Request received", {
+      hasFiles: !!req.files,
+      filesCount: req.files?.length || 0,
+      hasText: !!req.body?.text,
+      email: req.body?.email,
+    });
+
     const rawEmail = (req.body?.email || "").trim().toLowerCase();
     let text = (req.body?.text || "").trim();
-    let source = (req.body?.source || "unknown").trim();
     const courseName = (req.body?.course_name || "statistics").trim();
 
     if (!rawEmail) return res.status(400).json({ error: "email is required" });
@@ -320,54 +350,116 @@ app.post("/api/upload-course-material", upload.single("pdf"), async (req, res) =
       return res.status(403).json({ error: "Email not authorized" });
     }
 
-    // עיבוד PDF אם הועלה קובץ
-    if (req.file && req.file.mimetype === "application/pdf") {
-      try {
-        const pdfData = await pdfParse(req.file.buffer);
-        text = pdfData.text;
-        if (!source || source === "unknown") {
-          source = req.file.originalname || "uploaded.pdf";
+    const results = [];
+    const errors = [];
+
+    // עיבוד קבצי PDF אם הועלו
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        try {
+          if (file.mimetype !== "application/pdf") {
+            errors.push({ file: file.originalname, error: "Not a PDF file" });
+            continue;
+          }
+
+          const pdfData = await pdfParse(file.buffer);
+          const pdfText = pdfData.text.trim();
+          
+          if (!pdfText || pdfText.length === 0) {
+            errors.push({ file: file.originalname, error: "PDF is empty or could not extract text" });
+            continue;
+          }
+
+          const source = file.originalname || "uploaded.pdf";
+          console.log(`[PDF] Extracted ${pdfText.length} characters from PDF: ${source}`);
+
+          // העלאת הטקסט ל-RAG
+          const result = await uploadDocumentToRAG(pdfText, {
+            source,
+            course_name: courseName,
+            uploaded_by: rawEmail,
+            uploaded_at: new Date().toISOString(),
+            file_type: "pdf",
+          });
+
+          // לוג ב-Firestore
+          if (db) {
+            await db.collection("course_materials").add({
+              email: rawEmail,
+              source,
+              course_name: courseName,
+              text_length: pdfText.length,
+              chunks_count: result.chunksCount,
+              file_type: "pdf",
+              ts: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+
+          results.push({
+            file: source,
+            chunks_count: result.chunksCount,
+            text_length: pdfText.length,
+            success: true,
+          });
+
+        } catch (fileError) {
+          console.error(`[PDF Parse Error] ${file.originalname}:`, fileError);
+          errors.push({ 
+            file: file.originalname || "unknown", 
+            error: String(fileError) 
+          });
         }
-        console.log(`[PDF] Extracted ${text.length} characters from PDF: ${source}`);
-      } catch (pdfError) {
-        console.error("[PDF Parse Error]", pdfError);
-        return res.status(400).json({ error: "Failed to parse PDF", details: String(pdfError) });
       }
     }
 
-    // בדיקה שיש טקסט לעיבוד
-    if (!text || text.trim().length === 0) {
-      return res.status(400).json({ error: "text is required (or upload a PDF file)" });
-    }
-
-    // העלאת הטקסט ל-RAG
-    const result = await uploadDocumentToRAG(text, {
-      source,
-      course_name: courseName,
-      uploaded_by: rawEmail,
-      uploaded_at: new Date().toISOString(),
-      file_type: req.file ? "pdf" : "text",
-    });
-
-    // לוג ב-Firestore
-    if (db) {
-      await db.collection("course_materials").add({
-        email: rawEmail,
+    // עיבוד טקסט ישיר אם נשלח (ללא קבצים)
+    if ((!req.files || req.files.length === 0) && text) {
+      const source = (req.body?.source || "text_input").trim();
+      
+      const result = await uploadDocumentToRAG(text, {
         source,
         course_name: courseName,
-        text_length: text.length,
+        uploaded_by: rawEmail,
+        uploaded_at: new Date().toISOString(),
+        file_type: "text",
+      });
+
+      // לוג ב-Firestore
+      if (db) {
+        await db.collection("course_materials").add({
+          email: rawEmail,
+          source,
+          course_name: courseName,
+          text_length: text.length,
+          chunks_count: result.chunksCount,
+          file_type: "text",
+          ts: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+
+      results.push({
+        source: source,
         chunks_count: result.chunksCount,
-        file_type: req.file ? "pdf" : "text",
-        ts: admin.firestore.FieldValue.serverTimestamp(),
+        text_length: text.length,
+        success: true,
       });
     }
 
-    return res.json({ 
-      success: true, 
-      chunks_count: result.chunksCount,
-      message: `Uploaded ${result.chunksCount} chunks to RAG database`,
-      source: source,
-      file_type: req.file ? "pdf" : "text"
+    // בדיקה שיש לפחות תוצאה אחת מוצלחת
+    if (results.length === 0 && errors.length === 0) {
+      return res.status(400).json({ error: "No files or text provided" });
+    }
+
+    const totalChunks = results.reduce((sum, r) => sum + r.chunks_count, 0);
+
+    return res.json({
+      success: true,
+      total_chunks: totalChunks,
+      files_processed: results.length,
+      files_failed: errors.length,
+      results: results,
+      errors: errors.length > 0 ? errors : undefined,
+      message: `Processed ${results.length} file(s), uploaded ${totalChunks} chunks to RAG database`,
     });
 
   } catch (e) {
