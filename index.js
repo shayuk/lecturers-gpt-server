@@ -80,7 +80,10 @@ app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
 // הגדרת multer להעלאת קבצים
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB per file
+  limits: { 
+    fileSize: 50 * 1024 * 1024, // 50MB per file
+    files: 3 // מקסימום 3 קבצים בכל בקשה
+  },
   fileFilter: (req, file, cb) => {
     if (file.mimetype === "application/pdf") {
       cb(null, true);
@@ -98,7 +101,7 @@ const handleMulterError = (err, req, res, next) => {
         return res.status(400).json({ error: "File too large. Maximum size is 50MB per file" });
       }
       if (err.code === "LIMIT_FILE_COUNT") {
-        return res.status(400).json({ error: "Too many files. Maximum is 10 files" });
+        return res.status(400).json({ error: "Too many files. Maximum is 3 files per request" });
       }
       if (err.code === "LIMIT_UNEXPECTED_FILE") {
         return res.status(400).json({ error: "Unexpected file field. Use 'pdf' field name" });
@@ -337,7 +340,8 @@ function checkUploadAuth(rawEmail, bypass) {
 }
 
 // Endpoint להעלאת חומרי קורס ל-RAG (טקסט או PDF - תמיכה בכמה קבצים)
-app.post("/api/upload-course-material", upload.array("pdf", 10), handleMulterError, async (req, res) => {
+// מקסימום 3 קבצים בכל בקשה כדי למנוע עומס זיכרון
+app.post("/api/upload-course-material", upload.array("pdf", 3), handleMulterError, async (req, res) => {
   try {
     console.log("[Upload] Request received", {
       hasFiles: !!req.files,
@@ -364,6 +368,13 @@ app.post("/api/upload-course-material", upload.array("pdf", 10), handleMulterErr
 
     // עיבוד קבצי PDF אם הועלו
     if (req.files && req.files.length > 0) {
+      // הגבלה: מקסימום 3 קבצים בכל בקשה
+      if (req.files.length > 3) {
+        return res.status(400).json({ 
+          error: "Too many files. Maximum is 3 files per request. Please upload files in smaller batches." 
+        });
+      }
+
       for (const file of req.files) {
         const fileKey = `${rawEmail}_${file.originalname}_${file.size}`;
         
