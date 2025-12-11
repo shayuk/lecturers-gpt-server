@@ -354,17 +354,24 @@ app.options("/api/ask/stream", (req, res) => {
 // Endpoint ל-streaming עם SSE (Server-Sent Events)
 // שולח תשובות token-by-token בזמן אמת במקום להמתין לכל התשובה
 app.post("/api/ask/stream", async (req, res) => {
+  console.log("[Stream] Request received");
+  
   // הגדרת headers ל-SSE - מאפשרים streaming של תשובות בזמן אמת
-  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering
   res.setHeader("Access-Control-Allow-Origin", "https://lecturers-gpt-auth.web.app");
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message");
+  res.setHeader("Access-Control-Expose-Headers", "Content-Type");
   
   // שליחת headers מיד כדי להתחיל את ה-stream
   res.flushHeaders();
+  
+  // שליחת הודעה ראשונית כדי לוודא שה-connection עובד
+  res.write(`: connected\n\n`);
+  if (res.flush) res.flush();
 
   try {
     const rawEmail = (req.body?.email || "").trim().toLowerCase();
@@ -373,17 +380,21 @@ app.post("/api/ask/stream", async (req, res) => {
     const prompt = promptFromBody || promptFromHeader;
 
     if (!rawEmail) {
+      console.log("[Stream] Error: email is required");
       res.write(`data: ${JSON.stringify({ type: "error", message: "email is required" })}\n\n`);
-      res.flush?.();
+      if (res.flush) res.flush();
       res.end();
       return;
     }
     if (!prompt) {
+      console.log("[Stream] Error: prompt is required");
       res.write(`data: ${JSON.stringify({ type: "error", message: "prompt is required" })}\n\n`);
-      res.flush?.();
+      if (res.flush) res.flush();
       res.end();
       return;
     }
+    
+    console.log(`[Stream] Processing request for email: ${rawEmail.substring(0, 10)}..., prompt: ${prompt.substring(0, 30)}...`);
 
     // בדיקת הרשאות (אותה לוגיקה כמו ב-/api/ask)
     const bypass = BYPASS_AUTH.toLowerCase() === "true";
@@ -465,15 +476,25 @@ app.post("/api/ask/stream", async (req, res) => {
     let fullAnswer = "";
     let usage = null;
 
+    console.log("[Stream] Starting OpenAI stream...");
+    
     // לולאת streaming - מקבלת tokens בזמן אמת ושולחת אותם ל-client
+    let tokenCount = 0;
     for await (const chunk of stream) {
       const content = chunk.choices[0]?.delta?.content || "";
       if (content) {
         fullAnswer += content;
+        tokenCount++;
         // שליחת token דרך SSE - כל token נשלח מיד כשהוא מגיע
-        res.write(`data: ${JSON.stringify({ type: "token", content })}\n\n`);
+        const tokenData = JSON.stringify({ type: "token", content });
+        res.write(`data: ${tokenData}\n\n`);
         // flush מיד כדי לשלוח את הנתונים ל-client
         if (res.flush) res.flush();
+        
+        // לוג כל 10 tokens
+        if (tokenCount % 10 === 0) {
+          console.log(`[Stream] Sent ${tokenCount} tokens`);
+        }
       }
 
       // שמירת usage info אם קיים (בסוף ה-stream)
@@ -481,6 +502,8 @@ app.post("/api/ask/stream", async (req, res) => {
         usage = chunk.usage;
       }
     }
+    
+    console.log(`[Stream] Completed: ${tokenCount} tokens sent`);
 
     // שליחת sources אם קיימים (לפני סיום ה-stream)
     if (ragContext && ragContext.sources && ragContext.sources.length > 0) {
