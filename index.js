@@ -361,9 +361,8 @@ app.options("/api/ask/stream", (req, res) => {
   res.sendStatus(200);
 });
 
-// Endpoint ל-streaming עם ReadableStream (עובד טוב יותר מ-SSE עם POST)
-// שולח תשובות token-by-token בזמן אמת במקום להמתין לכל התשובה
-app.post("/api/ask/stream", async (req, res) => {
+// פונקציה משותפת לטיפול ב-streaming requests
+async function handleStreamingRequest(req, res) {
   console.log("[Stream] Request received");
   
   // הגדרת headers ל-streaming
