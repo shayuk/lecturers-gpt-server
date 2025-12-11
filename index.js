@@ -264,18 +264,27 @@ app.post("/api/ask", async (req, res) => {
     let ragContext = null;
     if (ragEnabled) {
       try {
-        // Promise עם timeout של 10 שניות
-        const ragPromise = getRAGContext(prompt, 3);
+        console.log(`[Ask] Querying RAG for prompt: "${prompt.substring(0, 50)}..."`);
+        // Promise עם timeout של 15 שניות (הוגדל)
+        const ragPromise = getRAGContext(prompt, 5); // הוגדל ל-5 chunks במקום 3
         const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error("RAG query timeout")), 10000)
+          setTimeout(() => reject(new Error("RAG query timeout")), 15000)
         );
         
         ragContext = await Promise.race([ragPromise, timeoutPromise]);
+        
+        if (ragContext && ragContext.context) {
+          console.log(`[Ask] RAG found ${ragContext.chunksCount} relevant chunks`);
+        } else {
+          console.log("[Ask] RAG returned no context");
+        }
       } catch (e) {
         console.error("[RAG Query Error]", e);
         // ממשיכים גם אם RAG נכשל - הבוט יעבוד בלי RAG
         ragContext = null;
       }
+    } else {
+      console.log("[Ask] RAG is disabled");
     }
 
     // בניית ה-prompt עם context מה-RAG

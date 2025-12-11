@@ -66,20 +66,27 @@ export async function queryRAG(queryText, topK = 3) {
   }
 
   try {
+    console.log(`[RAG] Querying for: "${queryText.substring(0, 50)}..."`);
+    
     // יצירת embedding לשאילתה
     const queryEmbedding = await createEmbedding(queryText);
+    console.log(`[RAG] Created query embedding, dimension: ${queryEmbedding.length}`);
 
     // קבלת כל ה-chunks מ-Firestore עם הגבלה (מקסימום 1000 כדי לא להעמיס על הזיכרון)
     const chunksSnapshot = await firestoreDb.collection("rag_chunks").limit(1000).get();
+    console.log(`[RAG] Found ${chunksSnapshot.size} chunks in database`);
     
     if (chunksSnapshot.empty) {
+      console.warn("[RAG] No chunks found in database");
       return { chunks: [], sources: [] };
     }
 
     // חישוב similarity לכל chunk (עם הגבלת זמן)
     const similarities = [];
     const startTime = Date.now();
-    const MAX_PROCESSING_TIME = 5000; // 5 שניות מקסימום
+    const MAX_PROCESSING_TIME = 10000; // 10 שניות מקסימום (הוגדל)
+    let processedCount = 0;
+    let skippedCount = 0;
     
     chunksSnapshot.forEach((doc) => {
       // בדיקת timeout
@@ -91,34 +98,56 @@ export async function queryRAG(queryText, topK = 3) {
       const data = doc.data();
       const chunkEmbedding = data.embedding;
       
-      if (chunkEmbedding && Array.isArray(chunkEmbedding)) {
-        try {
-          const similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
-          similarities.push({
-            id: doc.id,
-            text: data.text || "",
-            source: data.source || "unknown",
-            course_name: data.course_name || "",
-            similarity: similarity,
-            metadata: data.metadata || {},
-          });
-        } catch (simError) {
-          // דילוג על chunks עם שגיאות
-          console.warn(`[RAG] Error calculating similarity for chunk ${doc.id}:`, simError);
-        }
+      if (!chunkEmbedding) {
+        skippedCount++;
+        return;
+      }
+      
+      if (!Array.isArray(chunkEmbedding)) {
+        console.warn(`[RAG] Chunk ${doc.id} has invalid embedding type: ${typeof chunkEmbedding}`);
+        skippedCount++;
+        return;
+      }
+      
+      // בדיקת dimension
+      if (chunkEmbedding.length !== queryEmbedding.length) {
+        console.warn(`[RAG] Chunk ${doc.id} dimension mismatch: ${chunkEmbedding.length} vs ${queryEmbedding.length}`);
+        skippedCount++;
+        return;
+      }
+      
+      try {
+        const similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
+        similarities.push({
+          id: doc.id,
+          text: data.text || "",
+          source: data.source || "unknown",
+          course_name: data.course_name || "",
+          similarity: similarity,
+          metadata: data.metadata || {},
+        });
+        processedCount++;
+      } catch (simError) {
+        // דילוג על chunks עם שגיאות
+        console.warn(`[RAG] Error calculating similarity for chunk ${doc.id}:`, simError);
+        skippedCount++;
       }
     });
+
+    console.log(`[RAG] Processed ${processedCount} chunks, skipped ${skippedCount}`);
 
     // מיון לפי similarity וקבלת ה-topK
     similarities.sort((a, b) => b.similarity - a.similarity);
     const topResults = similarities.slice(0, topK);
+    
+    console.log(`[RAG] Top ${topResults.length} results, similarity range: ${topResults.length > 0 ? `${topResults[topResults.length - 1].similarity.toFixed(3)} - ${topResults[0].similarity.toFixed(3)}` : 'none'}`);
 
-    // עיבוד התוצאות
+    // עיבוד התוצאות - הורדנו את ה-filter ל-0.1 במקום 0.3
     const chunks = [];
     const sources = [];
 
     for (const result of topResults) {
-      if (result.text && result.similarity > 0.3) { // רק chunks עם similarity גבוה מ-0.3
+      if (result.text && result.similarity > 0.1) { // הורדנו מ-0.3 ל-0.1
         chunks.push(result.text);
         sources.push({
           source: result.source,
@@ -129,6 +158,7 @@ export async function queryRAG(queryText, topK = 3) {
       }
     }
 
+    console.log(`[RAG] Returning ${chunks.length} chunks after filtering`);
     return { chunks, sources };
   } catch (e) {
     console.error("[RAG Query Error]", e);
