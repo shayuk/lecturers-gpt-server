@@ -84,14 +84,14 @@ export async function queryRAG(queryText, topK = 3) {
     // חישוב similarity לכל chunk (עם הגבלת זמן)
     const similarities = [];
     const startTime = Date.now();
-    const MAX_PROCESSING_TIME = 10000; // 10 שניות מקסימום (הוגדל)
+    const MAX_PROCESSING_TIME = 25000; // 25 שניות מקסימום (הוגדל משמעותית)
     let processedCount = 0;
     let skippedCount = 0;
     
     chunksSnapshot.forEach((doc) => {
-      // בדיקת timeout
+      // בדיקת timeout - רק אם עבר הרבה זמן
       if (Date.now() - startTime > MAX_PROCESSING_TIME) {
-        console.warn("[RAG] Query timeout - stopping similarity calculation");
+        console.warn(`[RAG] Query timeout after ${processedCount} chunks - stopping similarity calculation`);
         return;
       }
 

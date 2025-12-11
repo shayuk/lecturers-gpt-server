@@ -265,10 +265,10 @@ app.post("/api/ask", async (req, res) => {
     if (ragEnabled) {
       try {
         console.log(`[Ask] Querying RAG for prompt: "${prompt.substring(0, 50)}..."`);
-        // Promise עם timeout של 15 שניות (הוגדל)
+        // Promise עם timeout של 30 שניות (הוגדל משמעותית)
         const ragPromise = getRAGContext(prompt, 5); // הוגדל ל-5 chunks במקום 3
         const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error("RAG query timeout")), 15000)
+          setTimeout(() => reject(new Error("RAG query timeout")), 30000)
         );
         
         ragContext = await Promise.race([ragPromise, timeoutPromise]);
