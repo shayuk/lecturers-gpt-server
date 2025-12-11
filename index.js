@@ -54,7 +54,7 @@ function normalizePrivateKey(raw) {
 const corsOptions = {
   origin: "https://lecturers-gpt-auth.web.app",
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "authorization", "x-api-secret", "x-gpt-user-message"],
+  allowedHeaders: ["Content-Type", "authorization", "x-api-secret", "x-gpt-user-message", "x-stream", "accept"],
   credentials: true
 };
 
@@ -64,7 +64,7 @@ const app = express();
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "https://lecturers-gpt-auth.web.app");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message");
+  res.header("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message, x-stream");
   res.header("Access-Control-Allow-Credentials", "true");
   
   if (req.method === "OPTIONS") {
@@ -189,11 +189,14 @@ app.get("/", (_req, res) => {
 
 app.post("/api/ask", async (req, res) => {
   // בדיקה אם זה streaming request
-  const isStreaming = req.query.stream === "true" || req.body?.stream === true || req.headers["accept"]?.includes("text/event-stream");
+  const isStreaming = req.query.stream === "true" || 
+                      req.body?.stream === true || 
+                      req.headers["accept"]?.includes("text/event-stream") ||
+                      req.headers["x-stream"] === "true";
   
   if (isStreaming) {
     // הפניה ל-streaming endpoint
-    console.log("[Ask] Redirecting to streaming endpoint");
+    console.log("[Ask] Redirecting to streaming endpoint - isStreaming:", isStreaming);
     // נשתמש באותו handler אבל עם streaming
     return handleStreamingRequest(req, res);
   }
