@@ -339,14 +339,30 @@ app.post("/api/ask", async (req, res) => {
   }
 });
 
+// OPTIONS handler ל-SSE endpoint (ל-CORS preflight)
+app.options("/api/ask/stream", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "https://lecturers-gpt-auth.web.app");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Max-Age", "86400");
+  res.sendStatus(200);
+});
+
 // Endpoint ל-streaming עם SSE (Server-Sent Events)
 // שולח תשובות token-by-token בזמן אמת במקום להמתין לכל התשובה
 app.post("/api/ask/stream", async (req, res) => {
   // הגדרת headers ל-SSE - מאפשרים streaming של תשובות בזמן אמת
   res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering
+  res.setHeader("Access-Control-Allow-Origin", "https://lecturers-gpt-auth.web.app");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message");
+  
+  // שליחת headers מיד כדי להתחיל את ה-stream
+  res.flushHeaders();
 
   try {
     const rawEmail = (req.body?.email || "").trim().toLowerCase();
@@ -356,11 +372,13 @@ app.post("/api/ask/stream", async (req, res) => {
 
     if (!rawEmail) {
       res.write(`data: ${JSON.stringify({ type: "error", message: "email is required" })}\n\n`);
+      res.flush?.();
       res.end();
       return;
     }
     if (!prompt) {
       res.write(`data: ${JSON.stringify({ type: "error", message: "prompt is required" })}\n\n`);
+      res.flush?.();
       res.end();
       return;
     }
@@ -378,6 +396,7 @@ app.post("/api/ask/stream", async (req, res) => {
 
       if (!emailInWhitelist && !domainOk) {
         res.write(`data: ${JSON.stringify({ type: "error", message: "Email not authorized" })}\n\n`);
+        res.flush?.();
         res.end();
         return;
       }
@@ -386,6 +405,7 @@ app.post("/api/ask/stream", async (req, res) => {
       if (!emailInWhitelist) {
         if (!admin.apps.length) {
           res.write(`data: ${JSON.stringify({ type: "error", message: "Firebase not initialized" })}\n\n`);
+          res.flush?.();
           res.end();
           return;
         }
@@ -395,11 +415,13 @@ app.post("/api/ask/stream", async (req, res) => {
           const userRole = ((user.customClaims && user.customClaims.role) || "").toLowerCase();
           if (rolesEnv.length && !rolesEnv.includes(userRole)) {
             res.write(`data: ${JSON.stringify({ type: "error", message: "Role not authorized" })}\n\n`);
+            res.flush?.();
             res.end();
             return;
           }
         } catch (err) {
           res.write(`data: ${JSON.stringify({ type: "error", message: "Email not authorized" })}\n\n`);
+          res.flush?.();
           res.end();
           return;
         }
@@ -448,6 +470,8 @@ app.post("/api/ask/stream", async (req, res) => {
         fullAnswer += content;
         // שליחת token דרך SSE - כל token נשלח מיד כשהוא מגיע
         res.write(`data: ${JSON.stringify({ type: "token", content })}\n\n`);
+        // flush מיד כדי לשלוח את הנתונים ל-client
+        if (res.flush) res.flush();
       }
 
       // שמירת usage info אם קיים (בסוף ה-stream)
@@ -458,6 +482,7 @@ app.post("/api/ask/stream", async (req, res) => {
 
     // שליחת הודעה על סיום ה-stream
     res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+    if (res.flush) res.flush();
 
     // לוג ב-Firestore (אסינכרוני, לא חוסם את התגובה)
     if (db) {
@@ -478,7 +503,13 @@ app.post("/api/ask/stream", async (req, res) => {
 
   } catch (e) {
     console.error("[/api/ask/stream error]", e);
+    if (!res.headersSent) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Access-Control-Allow-Origin", "https://lecturers-gpt-auth.web.app");
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
     res.write(`data: ${JSON.stringify({ type: "error", message: "Server error occurred" })}\n\n`);
+    if (res.flush) res.flush();
     res.end();
   }
 });
