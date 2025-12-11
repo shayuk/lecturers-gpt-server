@@ -77,6 +77,159 @@ fetch('https://your-server.com/api/upload-course-material', {
 ### שימוש
 לאחר העלאת החומרים, הבוט ישתמש בהם אוטומטית בעת מענה על שאלות. התשובות יתבססו על חומרי הקורס שהועלו באמצעות חיפוש similarity ב-Firestore.
 
+## Streaming API (תשובות בזמן אמת)
+
+השרת תומך ב-streaming של תשובות באמצעות Server-Sent Events (SSE), כך שהתשובה מופיעה token-by-token בזמן אמת במקום להמתין לכל התשובה.
+
+### Endpoint: `/api/ask/stream`
+
+שולח POST request עם:
+```json
+{
+  "email": "your-email@ariel.ac.il",
+  "prompt": "השאלה שלך כאן"
+}
+```
+
+התגובה היא SSE stream עם events:
+- `{"type":"token","content":"..."}` - כל token של התשובה
+- `{"type":"done"}` - סיום התשובה
+- `{"type":"error","message":"..."}` - שגיאה
+
+### דוגמה ל-Frontend (JavaScript/React)
+
+```javascript
+async function askWithStreaming(email, prompt, onToken, onDone, onError) {
+  const response = await fetch('/api/ask/stream', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ email, prompt })
+  });
+
+  if (!response.ok) {
+    onError('Network error');
+    return;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // שמירת השורה האחרונה שלא הושלמה
+
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (data.type === 'token') {
+            onToken(data.content);
+          } else if (data.type === 'done') {
+            onDone();
+            return;
+          } else if (data.type === 'error') {
+            onError(data.message);
+            return;
+          }
+        } catch (e) {
+          console.error('Parse error:', e);
+        }
+      }
+    }
+  }
+}
+
+// שימוש:
+let fullAnswer = '';
+askWithStreaming(
+  'user@example.com',
+  'מה זה סטטיסטיקה?',
+  (token) => {
+    fullAnswer += token;
+    // עדכון UI עם התשובה החלקית
+    updateChatUI(fullAnswer);
+  },
+  () => {
+    console.log('Stream completed');
+  },
+  (error) => {
+    console.error('Error:', error);
+  }
+);
+```
+
+### דוגמה ל-React Hook
+
+```javascript
+import { useState, useCallback } from 'react';
+
+function useStreamingChat() {
+  const [answer, setAnswer] = useState('');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [error, setError] = useState(null);
+
+  const ask = useCallback(async (email, prompt) => {
+    setAnswer('');
+    setIsStreaming(true);
+    setError(null);
+
+    try {
+      const response = await fetch('/api/ask/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, prompt })
+      });
+
+      if (!response.ok) throw new Error('Network error');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === 'token') {
+              setAnswer(prev => prev + data.content);
+            } else if (data.type === 'done') {
+              setIsStreaming(false);
+              return;
+            } else if (data.type === 'error') {
+              throw new Error(data.message);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      setError(err.message);
+      setIsStreaming(false);
+    }
+  }, []);
+
+  return { answer, isStreaming, error, ask };
+}
+```
+
+### הגדרת משתנה סביבה
+
+ניתן להשבית streaming דרך משתנה סביבה:
+- `ENABLE_STREAMING=false` - משבית את ה-streaming endpoint (ברירת מחדל: true)
+
 ## פריסת ענן מהירה (Render)
 1. צרי שירות Web חדש על בסיס GitHub או העלאת קבצים.
 2. הגדרי Build Command ריק (Node ללא בנייה) ו־Start Command: `node index.js`.

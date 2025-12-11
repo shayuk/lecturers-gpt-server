@@ -22,7 +22,8 @@ const {
   ALLOWED_EMAILS,
   API_SECRET,
   API_SECRET_ALLOW_BODY = "false",
-  USE_RAG = "true"
+  USE_RAG = "true",
+  ENABLE_STREAMING = "true"
 } = process.env;
 
 function normalizePrivateKey(raw) {
@@ -297,15 +298,8 @@ app.post("/api/ask", async (req, res) => {
     }
 
     // בניית ה-prompt עם context מה-RAG
-    let systemPrompt = `אתה עוזר סטטיסטיקה לסטודנטים בשם גלי-בוט. יש לך גישה למאגר חומרי קורס (RAG database) שמכיל חומרי לימוד שהועלו על ידי המרצים.
-
-${ragContext && ragContext.context ? `המידע הבא מחומרי הקורס זמין לך:
-${ragContext.context}
-
-השתמש במידע הזה כדי לענות על השאלות בצורה מדויקת ומקצועית.` : 'כרגע אין חומרי קורס זמינים במאגר, אבל אתה יכול לענות על בסיס הידע הכללי שלך.'}
-
-אם שואלים אותך על החומרים שיש לך במאגר, ציין את המקורות הרלוונטיים. ענה על השאלות בצורה ברורה ומקצועית.`;
-    let userMessage = prompt;
+    const systemPrompt = buildSystemPrompt(ragContext);
+    const userMessage = prompt;
 
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
@@ -344,6 +338,248 @@ ${ragContext.context}
     return res.status(500).json({ error: "Server error", details: String(e) });
   }
 });
+
+// Endpoint ל-streaming עם SSE (Server-Sent Events)
+// שולח תשובות token-by-token בזמן אמת במקום להמתין לכל התשובה
+app.post("/api/ask/stream", async (req, res) => {
+  // הגדרת headers ל-SSE - מאפשרים streaming של תשובות בזמן אמת
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering
+
+  try {
+    const rawEmail = (req.body?.email || "").trim().toLowerCase();
+    const promptFromBody = (req.body?.prompt || "").trim();
+    const promptFromHeader = (req.headers["x-gpt-user-message"] || "").trim();
+    const prompt = promptFromBody || promptFromHeader;
+
+    if (!rawEmail) {
+      res.write(`data: ${JSON.stringify({ type: "error", message: "email is required" })}\n\n`);
+      res.end();
+      return;
+    }
+    if (!prompt) {
+      res.write(`data: ${JSON.stringify({ type: "error", message: "prompt is required" })}\n\n`);
+      res.end();
+      return;
+    }
+
+    // בדיקת הרשאות (אותה לוגיקה כמו ב-/api/ask)
+    const bypass = BYPASS_AUTH.toLowerCase() === "true";
+    if (!bypass) {
+      const emailDomain = emailDomainOf(rawEmail);
+      const allowedDomains = splitCsvLower(ALLOWED_DOMAINS || ALLOWED_DOMAIN || "");
+      const allowedEmails = splitCsvLower(ALLOWED_EMAILS);
+      const emailInWhitelist = allowedEmails.length && allowedEmails.includes(rawEmail);
+      const domainOk = allowedDomains.length
+        ? allowedDomains.some(d => emailDomain === d || emailDomain.endsWith("." + d))
+        : true;
+
+      if (!emailInWhitelist && !domainOk) {
+        res.write(`data: ${JSON.stringify({ type: "error", message: "Email not authorized" })}\n\n`);
+        res.end();
+        return;
+      }
+
+      // בדיקת Firebase Auth רק אם המייל לא ברשימת ALLOWED_EMAILS
+      if (!emailInWhitelist) {
+        if (!admin.apps.length) {
+          res.write(`data: ${JSON.stringify({ type: "error", message: "Firebase not initialized" })}\n\n`);
+          res.end();
+          return;
+        }
+        try {
+          const user = await admin.auth().getUserByEmail(rawEmail);
+          const rolesEnv = splitCsvLower(process.env.ALLOWED_ROLES || process.env.REQUIRED_ROLE || "");
+          const userRole = ((user.customClaims && user.customClaims.role) || "").toLowerCase();
+          if (rolesEnv.length && !rolesEnv.includes(userRole)) {
+            res.write(`data: ${JSON.stringify({ type: "error", message: "Role not authorized" })}\n\n`);
+            res.end();
+            return;
+          }
+        } catch (err) {
+          res.write(`data: ${JSON.stringify({ type: "error", message: "Email not authorized" })}\n\n`);
+          res.end();
+          return;
+        }
+      }
+    }
+
+    const { first_login } = await checkAndMarkFirstLogin(rawEmail);
+
+    // שאילתה ב-RAG אם מופעל (עם timeout)
+    let ragContext = null;
+    if (ragEnabled) {
+      try {
+        const ragPromise = getRAGContext(prompt, 5);
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("RAG query timeout")), 20000)
+        );
+        ragContext = await Promise.race([ragPromise, timeoutPromise]);
+      } catch (e) {
+        console.error("[RAG Query Error in stream]", e);
+        ragContext = null;
+      }
+    }
+
+    // בניית ה-prompt
+    const systemPrompt = buildSystemPrompt(ragContext);
+    const userMessage = prompt;
+
+    // יצירת streaming completion - OpenAI מחזיר stream של tokens
+    const stream = await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage }
+      ],
+      temperature: 0.2,
+      stream: true // הפעלת streaming mode
+    });
+
+    let fullAnswer = "";
+    let usage = null;
+
+    // לולאת streaming - מקבלת tokens בזמן אמת ושולחת אותם ל-client
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content || "";
+      if (content) {
+        fullAnswer += content;
+        // שליחת token דרך SSE - כל token נשלח מיד כשהוא מגיע
+        res.write(`data: ${JSON.stringify({ type: "token", content })}\n\n`);
+      }
+
+      // שמירת usage info אם קיים (בסוף ה-stream)
+      if (chunk.usage) {
+        usage = chunk.usage;
+      }
+    }
+
+    // שליחת הודעה על סיום ה-stream
+    res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+
+    // לוג ב-Firestore (אסינכרוני, לא חוסם את התגובה)
+    if (db) {
+      db.collection("usage_logs").add({
+        email: rawEmail,
+        model: OPENAI_MODEL,
+        tokens_prompt: usage?.prompt_tokens ?? null,
+        tokens_completion: usage?.completion_tokens ?? null,
+        tokens_total: usage?.total_tokens ?? null,
+        streaming: true,
+        first_login,
+        ts: admin.firestore.FieldValue.serverTimestamp(),
+        meta: req.body?.meta || null
+      }).catch(err => console.error("[Stream log error]", err));
+    }
+
+    res.end();
+
+  } catch (e) {
+    console.error("[/api/ask/stream error]", e);
+    res.write(`data: ${JSON.stringify({ type: "error", message: "Server error occurred" })}\n\n`);
+    res.end();
+  }
+});
+
+// פונקציה עזר לבניית system prompt
+function buildSystemPrompt(ragContext) {
+  return `אתה עוזר סטטיסטיקה לסטודנטים בשם גלי-בוט. יש לך גישה למאגר חומרי קורס (RAG database) שמכיל חומרי לימוד שהועלו על ידי המרצים.
+
+${ragContext && ragContext.context ? `המידע הבא מחומרי הקורס זמין לך:
+${ragContext.context}
+
+השתמש במידע הזה כדי לענות על השאלות בצורה מדויקת ומקצועית.` : 'כרגע אין חומרי קורס זמינים במאגר, אבל אתה יכול לענות על בסיס הידע הכללי שלך.'}
+
+אם שואלים אותך על החומרים שיש לך במאגר, ציין את המקורות הרלוונטיים. ענה על השאלות בצורה ברורה ומקצועית.`;
+}
+
+// פונקציה עזר לבדיקת הרשאות (משותפת ל-/api/ask ו-/api/ask/stream)
+async function checkAuthAndGetRAG(rawEmail, prompt, bypass) {
+  // בדיקת הרשאות
+  if (!bypass) {
+    const emailDomain = emailDomainOf(rawEmail);
+    const allowedDomains = splitCsvLower(ALLOWED_DOMAINS || ALLOWED_DOMAIN || "");
+    const allowedEmails = splitCsvLower(ALLOWED_EMAILS);
+    const emailInWhitelist = allowedEmails.length && allowedEmails.includes(rawEmail);
+    const domainOk = allowedDomains.length
+      ? allowedDomains.some(d => emailDomain === d || emailDomain.endsWith("." + d))
+      : true;
+
+    if (!emailInWhitelist && !domainOk) {
+      if (db) {
+        await db.collection("security_logs").add({
+          type: "forbidden_domain",
+          email: rawEmail,
+          emailDomain,
+          allowedDomains,
+          domainOk,
+          listOk: emailInWhitelist,
+          ts: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+      return { authorized: false, error: "Email not authorized (domain/list)" };
+    }
+
+    // בדיקת Firebase Auth רק אם המייל לא ברשימת ALLOWED_EMAILS
+    if (!emailInWhitelist) {
+      if (!admin.apps.length) {
+        return { authorized: false, error: "Firebase not initialized" };
+      }
+      try {
+        const user = await admin.auth().getUserByEmail(rawEmail);
+        const rolesEnv = splitCsvLower(process.env.ALLOWED_ROLES || process.env.REQUIRED_ROLE || "");
+        const userRole = ((user.customClaims && user.customClaims.role) || "").toLowerCase();
+        if (rolesEnv.length && !rolesEnv.includes(userRole)) {
+          if (db) {
+            await db.collection("security_logs").add({
+              type: "forbidden_role",
+              email: rawEmail,
+              role: userRole || null,
+              allowedRoles: rolesEnv,
+              ts: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+          return { authorized: false, error: "Role not authorized" };
+        }
+      } catch (err) {
+        if (db) {
+          await db.collection("security_logs").add({
+            type: "auth_not_found",
+            email: rawEmail,
+            ts: admin.firestore.FieldValue.serverTimestamp(),
+            err: String(err),
+          });
+        }
+        return { authorized: false, error: "Email not authorized" };
+      }
+    }
+  }
+
+  // שאילתה ב-RAG אם מופעל
+  let ragContext = null;
+  if (ragEnabled) {
+    const ragStartTime = Date.now();
+    try {
+      console.log(`[Ask] Querying RAG for prompt: "${prompt.substring(0, 50)}..."`);
+      const ragPromise = getRAGContext(prompt, 5);
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("RAG query timeout")), 20000)
+      );
+      ragContext = await Promise.race([ragPromise, timeoutPromise]);
+      const duration = ((Date.now() - ragStartTime) / 1000).toFixed(2);
+      if (ragContext && ragContext.context) {
+        console.log(`[Ask] RAG found ${ragContext.chunksCount} relevant chunks in ${duration}s`);
+      }
+    } catch (e) {
+      console.error(`[RAG Query Error]:`, e.message);
+      ragContext = null;
+    }
+  }
+
+  return { authorized: true, ragContext };
+}
 
 // פונקציה עזר לבדיקת הרשאות
 function checkUploadAuth(rawEmail, bypass) {
