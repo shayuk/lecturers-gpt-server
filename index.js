@@ -260,14 +260,21 @@ app.post("/api/ask", async (req, res) => {
 
     const { first_login } = await checkAndMarkFirstLogin(rawEmail);
 
-    // שאילתה ב-RAG אם מופעל
+    // שאילתה ב-RAG אם מופעל (עם timeout)
     let ragContext = null;
     if (ragEnabled) {
       try {
-        ragContext = await getRAGContext(prompt, 3);
+        // Promise עם timeout של 10 שניות
+        const ragPromise = getRAGContext(prompt, 3);
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("RAG query timeout")), 10000)
+        );
+        
+        ragContext = await Promise.race([ragPromise, timeoutPromise]);
       } catch (e) {
         console.error("[RAG Query Error]", e);
-        // ממשיכים גם אם RAG נכשל
+        // ממשיכים גם אם RAG נכשל - הבוט יעבוד בלי RAG
+        ragContext = null;
       }
     }
 

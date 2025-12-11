@@ -69,30 +69,43 @@ export async function queryRAG(queryText, topK = 3) {
     // יצירת embedding לשאילתה
     const queryEmbedding = await createEmbedding(queryText);
 
-    // קבלת כל ה-chunks מ-Firestore
-    const chunksSnapshot = await firestoreDb.collection("rag_chunks").get();
+    // קבלת כל ה-chunks מ-Firestore עם הגבלה (מקסימום 1000 כדי לא להעמיס על הזיכרון)
+    const chunksSnapshot = await firestoreDb.collection("rag_chunks").limit(1000).get();
     
     if (chunksSnapshot.empty) {
       return { chunks: [], sources: [] };
     }
 
-    // חישוב similarity לכל chunk
+    // חישוב similarity לכל chunk (עם הגבלת זמן)
     const similarities = [];
+    const startTime = Date.now();
+    const MAX_PROCESSING_TIME = 5000; // 5 שניות מקסימום
     
     chunksSnapshot.forEach((doc) => {
+      // בדיקת timeout
+      if (Date.now() - startTime > MAX_PROCESSING_TIME) {
+        console.warn("[RAG] Query timeout - stopping similarity calculation");
+        return;
+      }
+
       const data = doc.data();
       const chunkEmbedding = data.embedding;
       
       if (chunkEmbedding && Array.isArray(chunkEmbedding)) {
-        const similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
-        similarities.push({
-          id: doc.id,
-          text: data.text || "",
-          source: data.source || "unknown",
-          course_name: data.course_name || "",
-          similarity: similarity,
-          metadata: data.metadata || {},
-        });
+        try {
+          const similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
+          similarities.push({
+            id: doc.id,
+            text: data.text || "",
+            source: data.source || "unknown",
+            course_name: data.course_name || "",
+            similarity: similarity,
+            metadata: data.metadata || {},
+          });
+        } catch (simError) {
+          // דילוג על chunks עם שגיאות
+          console.warn(`[RAG] Error calculating similarity for chunk ${doc.id}:`, simError);
+        }
       }
     });
 
@@ -105,7 +118,7 @@ export async function queryRAG(queryText, topK = 3) {
     const sources = [];
 
     for (const result of topResults) {
-      if (result.text) {
+      if (result.text && result.similarity > 0.3) { // רק chunks עם similarity גבוה מ-0.3
         chunks.push(result.text);
         sources.push({
           source: result.source,
