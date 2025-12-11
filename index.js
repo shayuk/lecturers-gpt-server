@@ -351,12 +351,12 @@ app.options("/api/ask/stream", (req, res) => {
   res.sendStatus(200);
 });
 
-// Endpoint ל-streaming עם SSE (Server-Sent Events)
+// Endpoint ל-streaming עם ReadableStream (עובד טוב יותר מ-SSE עם POST)
 // שולח תשובות token-by-token בזמן אמת במקום להמתין לכל התשובה
 app.post("/api/ask/stream", async (req, res) => {
   console.log("[Stream] Request received");
   
-  // הגדרת headers ל-SSE - מאפשרים streaming של תשובות בזמן אמת
+  // הגדרת headers ל-streaming
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
@@ -370,8 +370,14 @@ app.post("/api/ask/stream", async (req, res) => {
   res.flushHeaders();
   
   // שליחת הודעה ראשונית כדי לוודא שה-connection עובד
-  res.write(`: connected\n\n`);
-  if (res.flush) res.flush();
+  try {
+    res.write(`: connected\n\n`);
+    if (res.flush) res.flush();
+  } catch (e) {
+    console.error("[Stream] Error writing initial message:", e);
+    res.end();
+    return;
+  }
 
   try {
     const rawEmail = (req.body?.email || "").trim().toLowerCase();
@@ -480,40 +486,67 @@ app.post("/api/ask/stream", async (req, res) => {
     
     // לולאת streaming - מקבלת tokens בזמן אמת ושולחת אותם ל-client
     let tokenCount = 0;
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content || "";
-      if (content) {
-        fullAnswer += content;
-        tokenCount++;
-        // שליחת token דרך SSE - כל token נשלח מיד כשהוא מגיע
-        const tokenData = JSON.stringify({ type: "token", content });
-        res.write(`data: ${tokenData}\n\n`);
-        // flush מיד כדי לשלוח את הנתונים ל-client
-        if (res.flush) res.flush();
+    try {
+      for await (const chunk of stream) {
+        // בדיקה אם ה-client עדיין מחובר
+        if (res.destroyed || res.closed) {
+          console.log("[Stream] Client disconnected, stopping stream");
+          break;
+        }
         
-        // לוג כל 10 tokens
-        if (tokenCount % 10 === 0) {
-          console.log(`[Stream] Sent ${tokenCount} tokens`);
+        const content = chunk.choices[0]?.delta?.content || "";
+        if (content) {
+          fullAnswer += content;
+          tokenCount++;
+          // שליחת token דרך SSE - כל token נשלח מיד כשהוא מגיע
+          const tokenData = JSON.stringify({ type: "token", content });
+          try {
+            res.write(`data: ${tokenData}\n\n`);
+            // flush מיד כדי לשלוח את הנתונים ל-client
+            if (res.flush) res.flush();
+          } catch (writeError) {
+            console.error("[Stream] Error writing token:", writeError);
+            break;
+          }
+          
+          // לוג כל 10 tokens
+          if (tokenCount % 10 === 0) {
+            console.log(`[Stream] Sent ${tokenCount} tokens`);
+          }
+        }
+
+        // שמירת usage info אם קיים (בסוף ה-stream)
+        if (chunk.usage) {
+          usage = chunk.usage;
         }
       }
-
-      // שמירת usage info אם קיים (בסוף ה-stream)
-      if (chunk.usage) {
-        usage = chunk.usage;
-      }
+    } catch (streamError) {
+      console.error("[Stream] Error in stream loop:", streamError);
+      res.write(`data: ${JSON.stringify({ type: "error", message: "Stream error occurred" })}\n\n`);
+      if (res.flush) res.flush();
+      res.end();
+      return;
     }
     
     console.log(`[Stream] Completed: ${tokenCount} tokens sent`);
 
     // שליחת sources אם קיימים (לפני סיום ה-stream)
     if (ragContext && ragContext.sources && ragContext.sources.length > 0) {
-      res.write(`data: ${JSON.stringify({ type: "sources", sources: ragContext.sources })}\n\n`);
-      if (res.flush) res.flush();
+      try {
+        res.write(`data: ${JSON.stringify({ type: "sources", sources: ragContext.sources })}\n\n`);
+        if (res.flush) res.flush();
+      } catch (e) {
+        console.error("[Stream] Error writing sources:", e);
+      }
     }
 
     // שליחת הודעה על סיום ה-stream
-    res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
-    if (res.flush) res.flush();
+    try {
+      res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+      if (res.flush) res.flush();
+    } catch (e) {
+      console.error("[Stream] Error writing done message:", e);
+    }
 
     // לוג ב-Firestore (אסינכרוני, לא חוסם את התגובה)
     if (db) {
