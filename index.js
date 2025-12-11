@@ -188,6 +188,16 @@ app.get("/", (_req, res) => {
 });
 
 app.post("/api/ask", async (req, res) => {
+  // בדיקה אם זה streaming request
+  const isStreaming = req.query.stream === "true" || req.body?.stream === true || req.headers["accept"]?.includes("text/event-stream");
+  
+  if (isStreaming) {
+    // הפניה ל-streaming endpoint
+    console.log("[Ask] Redirecting to streaming endpoint");
+    // נשתמש באותו handler אבל עם streaming
+    return handleStreamingRequest(req, res);
+  }
+  
   try {
     const rawEmail = (req.body?.email || "").trim().toLowerCase();
     const promptFromBody = (req.body?.prompt || "").trim();
@@ -577,6 +587,12 @@ app.post("/api/ask/stream", async (req, res) => {
     if (res.flush) res.flush();
     res.end();
   }
+}
+
+// Endpoint ל-streaming עם SSE (Server-Sent Events)
+// שולח תשובות token-by-token בזמן אמת במקום להמתין לכל התשובה
+app.post("/api/ask/stream", async (req, res) => {
+  return handleStreamingRequest(req, res);
 });
 
 // פונקציה עזר לבניית system prompt
