@@ -137,15 +137,17 @@ export async function uploadDocumentToRAG(text, metadata = {}) {
     let uploadedCount = 0;
 
     // עיבוד chunks בקבוצות קטנות כדי לחסוך זיכרון
-    const BATCH_SIZE = 5; // מעבד 5 chunks בכל פעם
+    const BATCH_SIZE = 3; // מעבד 3 chunks בכל פעם (הוקטן כדי לחסוך זיכרון)
     
     for (let batchStart = 0; batchStart < chunks.length; batchStart += BATCH_SIZE) {
       const batchEnd = Math.min(batchStart + BATCH_SIZE, chunks.length);
       const batch = chunks.slice(batchStart, batchEnd);
       
-      // עיבוד כל ה-batch במקביל
-      const batchPromises = batch.map(async (chunk, batchIndex) => {
+      // עיבוד כל ה-batch ברצף (לא במקביל) כדי לחסוך זיכרון
+      for (let batchIndex = 0; batchIndex < batch.length; batchIndex++) {
+        const chunk = batch[batchIndex];
         const i = batchStart + batchIndex;
+        
         try {
           const embedding = await createEmbedding(chunk);
           
@@ -165,22 +167,23 @@ export async function uploadDocumentToRAG(text, metadata = {}) {
           });
 
           uploadedCount++;
-          return { success: true, index: i };
+          
+          // ניקוי זיכרון - מנסה לשחרר את ה-embedding מהזיכרון
+          if (global.gc) {
+            global.gc();
+          }
         } catch (chunkError) {
           console.error(`[RAG] Error processing chunk ${i + 1}:`, chunkError);
-          return { success: false, index: i, error: chunkError };
+          // ממשיכים עם ה-chunk הבא
         }
-      });
-      
-      // מחכה לסיום ה-batch לפני מעבר ל-batch הבא
-      await Promise.all(batchPromises);
+      }
       
       // Log progress כל batch
       console.log(`[RAG] Progress: ${batchEnd}/${chunks.length} chunks uploaded`);
       
-      // קצת המתנה בין batches כדי לא להעמיס על ה-API
+      // המתנה בין batches כדי לא להעמיס על ה-API ולאפשר garbage collection
       if (batchEnd < chunks.length) {
-        await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay
+        await new Promise(resolve => setTimeout(resolve, 200)); // 200ms delay
       }
     }
 

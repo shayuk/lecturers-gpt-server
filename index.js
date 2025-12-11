@@ -388,6 +388,9 @@ app.post("/api/upload-course-material", upload.array("pdf", 10), handleMulterErr
           const pdfData = await pdfParse(file.buffer);
           const pdfText = pdfData.text.trim();
           
+          // ניקוי ה-buffer מהזיכרון אחרי עיבוד
+          file.buffer = null;
+          
           if (!pdfText || pdfText.length === 0) {
             processingFiles.delete(fileKey);
             errors.push({ file: file.originalname, error: "PDF is empty or could not extract text" });
