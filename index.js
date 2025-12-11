@@ -51,8 +51,24 @@ function normalizePrivateKey(raw) {
   return k;
 }
 
+// רשימת origins מורשים
+const allowedOrigins = [
+  "https://lecturers-gpt-auth.web.app",
+  "https://shayuk.github.io"
+];
+
 const corsOptions = {
-  origin: "https://lecturers-gpt-auth.web.app",
+  origin: function (origin, callback) {
+    // מאפשר requests ללא origin (כמו Postman או curl)
+    if (!origin) return callback(null, true);
+    
+    // בודק אם ה-origin ברשימה המורשית
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "authorization", "x-api-secret", "x-gpt-user-message", "x-stream", "accept"],
   credentials: true
@@ -62,9 +78,15 @@ const app = express();
 
 // CORS middleware - מוסיף headers מפורשים
 app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "https://lecturers-gpt-auth.web.app");
+  const origin = req.headers.origin;
+  
+  // בודק אם ה-origin מורשה
+  if (origin && allowedOrigins.indexOf(origin) !== -1) {
+    res.header("Access-Control-Allow-Origin", origin);
+  }
+  
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message, x-stream");
+  res.header("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message, x-stream, accept");
   res.header("Access-Control-Allow-Credentials", "true");
   
   if (req.method === "OPTIONS") {
@@ -375,9 +397,12 @@ app.post("/api/ask", async (req, res) => {
 
 // OPTIONS handler ל-SSE endpoint (ל-CORS preflight)
 app.options("/api/ask/stream", (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "https://lecturers-gpt-auth.web.app");
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.indexOf(origin) !== -1) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message, x-stream, accept");
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Max-Age", "86400");
   res.sendStatus(200);
@@ -388,13 +413,19 @@ async function handleStreamingRequest(req, res) {
   console.log("[Stream] Request received");
   
   // הגדרת headers ל-streaming
+  const origin = req.headers.origin;
+  
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering
-  res.setHeader("Access-Control-Allow-Origin", "https://lecturers-gpt-auth.web.app");
+  
+  // CORS headers - בודק אם ה-origin מורשה
+  if (origin && allowedOrigins.indexOf(origin) !== -1) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
   res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message, x-stream, accept");
   res.setHeader("Access-Control-Expose-Headers", "Content-Type");
   
   // שליחת headers מיד כדי להתחיל את ה-stream
@@ -597,17 +628,20 @@ async function handleStreamingRequest(req, res) {
 
     res.end();
 
-  } catch (e) {
-    console.error("[/api/ask/stream error]", e);
-    if (!res.headersSent) {
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Access-Control-Allow-Origin", "https://lecturers-gpt-auth.web.app");
-      res.setHeader("Access-Control-Allow-Credentials", "true");
-    }
-    res.write(`data: ${JSON.stringify({ type: "error", message: "Server error occurred" })}\n\n`);
-    if (res.flush) res.flush();
-    res.end();
-  }
+              } catch (e) {
+                console.error("[/api/ask/stream error]", e);
+                if (!res.headersSent) {
+                  const origin = req.headers.origin;
+                  res.setHeader("Content-Type", "text/event-stream");
+                  if (origin && allowedOrigins.indexOf(origin) !== -1) {
+                    res.setHeader("Access-Control-Allow-Origin", origin);
+                  }
+                  res.setHeader("Access-Control-Allow-Credentials", "true");
+                }
+                res.write(`data: ${JSON.stringify({ type: "error", message: "Server error occurred" })}\n\n`);
+                if (res.flush) res.flush();
+                res.end();
+              }
 }
 
 // Endpoint ל-streaming עם SSE (Server-Sent Events)
