@@ -188,11 +188,28 @@ app.get("/", (_req, res) => {
 });
 
 app.post("/api/ask", async (req, res) => {
+  // Logging לכל הבקשות כדי לראות מה מגיע
+  console.log("[Ask] Request received:", {
+    query: req.query,
+    hasStreamInBody: !!req.body?.stream,
+    acceptHeader: req.headers["accept"],
+    xStreamHeader: req.headers["x-stream"],
+    url: req.url
+  });
+  
   // בדיקה אם זה streaming request
   const isStreaming = req.query.stream === "true" || 
                       req.body?.stream === true || 
                       req.headers["accept"]?.includes("text/event-stream") ||
                       req.headers["x-stream"] === "true";
+  
+  console.log("[Ask] isStreaming check:", {
+    queryStream: req.query.stream === "true",
+    bodyStream: req.body?.stream === true,
+    acceptHeader: req.headers["accept"]?.includes("text/event-stream"),
+    xStreamHeader: req.headers["x-stream"] === "true",
+    finalResult: isStreaming
+  });
   
   if (isStreaming) {
     // הפניה ל-streaming endpoint
@@ -200,6 +217,8 @@ app.post("/api/ask", async (req, res) => {
     // נשתמש באותו handler אבל עם streaming
     return handleStreamingRequest(req, res);
   }
+  
+  console.log("[Ask] Using regular (non-streaming) endpoint");
   
   try {
     const rawEmail = (req.body?.email || "").trim().toLowerCase();
