@@ -74,13 +74,13 @@ app.use((req, res, next) => {
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
-app.use(bodyParser.json({ limit: "10mb" }));
-app.use(bodyParser.urlencoded({ extended: true, limit: "10mb" }));
+app.use(bodyParser.json({ limit: "50mb" }));
+app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
 
 // הגדרת multer להעלאת קבצים
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB per file
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB per file
   fileFilter: (req, file, cb) => {
     if (file.mimetype === "application/pdf") {
       cb(null, true);
@@ -95,7 +95,7 @@ const handleMulterError = (err, req, res, next) => {
   if (err) {
     if (err instanceof multer.MulterError) {
       if (err.code === "LIMIT_FILE_SIZE") {
-        return res.status(400).json({ error: "File too large. Maximum size is 10MB per file" });
+        return res.status(400).json({ error: "File too large. Maximum size is 50MB per file" });
       }
       if (err.code === "LIMIT_FILE_COUNT") {
         return res.status(400).json({ error: "Too many files. Maximum is 10 files" });
