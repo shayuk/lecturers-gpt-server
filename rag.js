@@ -136,38 +136,51 @@ export async function uploadDocumentToRAG(text, metadata = {}) {
 
     let uploadedCount = 0;
 
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
+    // עיבוד chunks בקבוצות קטנות כדי לחסוך זיכרון
+    const BATCH_SIZE = 5; // מעבד 5 chunks בכל פעם
+    
+    for (let batchStart = 0; batchStart < chunks.length; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, chunks.length);
+      const batch = chunks.slice(batchStart, batchEnd);
       
-      // יצירת embedding
-      try {
-        const embedding = await createEmbedding(chunk);
-        
-        // שמירה ב-Firestore
-        await firestoreDb.collection("rag_chunks").add({
-          text: chunk,
-          embedding: embedding,
-          chunk_index: i,
-          source: metadata.source || "unknown",
-          course_name: metadata.course_name || "statistics",
-          uploaded_by: metadata.uploaded_by || "",
-          uploaded_at: metadata.uploaded_at || new Date().toISOString(),
-          metadata: {
-            ...metadata,
-            total_chunks: chunks.length,
-          },
-        });
+      // עיבוד כל ה-batch במקביל
+      const batchPromises = batch.map(async (chunk, batchIndex) => {
+        const i = batchStart + batchIndex;
+        try {
+          const embedding = await createEmbedding(chunk);
+          
+          // שמירה ב-Firestore
+          await firestoreDb.collection("rag_chunks").add({
+            text: chunk,
+            embedding: embedding,
+            chunk_index: i,
+            source: metadata.source || "unknown",
+            course_name: metadata.course_name || "statistics",
+            uploaded_by: metadata.uploaded_by || "",
+            uploaded_at: metadata.uploaded_at || new Date().toISOString(),
+            metadata: {
+              ...metadata,
+              total_chunks: chunks.length,
+            },
+          });
 
-        uploadedCount++;
-        
-        // Log progress כל 10 chunks
-        if ((i + 1) % 10 === 0 || i === chunks.length - 1) {
-          console.log(`[RAG] Progress: ${i + 1}/${chunks.length} chunks uploaded`);
+          uploadedCount++;
+          return { success: true, index: i };
+        } catch (chunkError) {
+          console.error(`[RAG] Error processing chunk ${i + 1}:`, chunkError);
+          return { success: false, index: i, error: chunkError };
         }
-      } catch (chunkError) {
-        console.error(`[RAG] Error processing chunk ${i + 1}:`, chunkError);
-        // ממשיכים עם ה-chunk הבא
-        continue;
+      });
+      
+      // מחכה לסיום ה-batch לפני מעבר ל-batch הבא
+      await Promise.all(batchPromises);
+      
+      // Log progress כל batch
+      console.log(`[RAG] Progress: ${batchEnd}/${chunks.length} chunks uploaded`);
+      
+      // קצת המתנה בין batches כדי לא להעמיס על ה-API
+      if (batchEnd < chunks.length) {
+        await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay
       }
     }
 

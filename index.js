@@ -136,6 +136,9 @@ try {
 const db = admin.apps.length ? admin.firestore() : null;
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
+// הגנה מפני בקשות כפולות - מטפל רק בבקשה אחת לכל קובץ בכל זמן
+const processingFiles = new Set();
+
 // אתחול RAG
 let ragEnabled = false;
 try {
@@ -362,16 +365,31 @@ app.post("/api/upload-course-material", upload.array("pdf", 10), handleMulterErr
     // עיבוד קבצי PDF אם הועלו
     if (req.files && req.files.length > 0) {
       for (const file of req.files) {
+        const fileKey = `${rawEmail}_${file.originalname}_${file.size}`;
+        
+        // בדיקה אם הקובץ כבר בעיבוד
+        if (processingFiles.has(fileKey)) {
+          errors.push({ 
+            file: file.originalname, 
+            error: "File is already being processed. Please wait." 
+          });
+          continue;
+        }
+
         try {
           if (file.mimetype !== "application/pdf") {
             errors.push({ file: file.originalname, error: "Not a PDF file" });
             continue;
           }
 
+          // סימון שהקובץ בעיבוד
+          processingFiles.add(fileKey);
+
           const pdfData = await pdfParse(file.buffer);
           const pdfText = pdfData.text.trim();
           
           if (!pdfText || pdfText.length === 0) {
+            processingFiles.delete(fileKey);
             errors.push({ file: file.originalname, error: "PDF is empty or could not extract text" });
             continue;
           }
@@ -391,6 +409,9 @@ app.post("/api/upload-course-material", upload.array("pdf", 10), handleMulterErr
           });
           const uploadDuration = ((Date.now() - uploadStartTime) / 1000).toFixed(2);
           console.log(`[Upload] Completed RAG upload for ${source} in ${uploadDuration}s`);
+
+          // הסרת הקובץ מרשימת הקבצים בעיבוד
+          processingFiles.delete(fileKey);
 
           // לוג ב-Firestore
           if (db) {
@@ -414,6 +435,7 @@ app.post("/api/upload-course-material", upload.array("pdf", 10), handleMulterErr
 
         } catch (fileError) {
           console.error(`[PDF Parse Error] ${file.originalname}:`, fileError);
+          processingFiles.delete(fileKey); // הסרה גם במקרה של שגיאה
           errors.push({ 
             file: file.originalname || "unknown", 
             error: String(fileError) 
