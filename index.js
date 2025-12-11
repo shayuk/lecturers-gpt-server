@@ -138,6 +138,7 @@ try {
 }
 
 const db = admin.apps.length ? admin.firestore() : null;
+const firestoreDb = db; // alias for consistency with rag.js
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // הגנה מפני בקשות כפולות - מטפל רק בבקשה אחת לכל קובץ בכל זמן
@@ -330,7 +331,8 @@ app.post("/api/ask", async (req, res) => {
       usage: completion?.usage || null, 
       model: completion?.model || OPENAI_MODEL, 
       first_login,
-      rag_sources: ragContext?.sources || null
+      rag_sources: ragContext?.sources || null,
+      rag_chunks_count: ragContext?.chunksCount || 0
     });
 
   } catch (e) {
@@ -480,6 +482,12 @@ app.post("/api/ask/stream", async (req, res) => {
       }
     }
 
+    // שליחת sources אם קיימים (לפני סיום ה-stream)
+    if (ragContext && ragContext.sources && ragContext.sources.length > 0) {
+      res.write(`data: ${JSON.stringify({ type: "sources", sources: ragContext.sources })}\n\n`);
+      if (res.flush) res.flush();
+    }
+
     // שליחת הודעה על סיום ה-stream
     res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
     if (res.flush) res.flush();
@@ -494,6 +502,7 @@ app.post("/api/ask/stream", async (req, res) => {
         tokens_total: usage?.total_tokens ?? null,
         streaming: true,
         first_login,
+        rag_sources: ragContext?.sources || null,
         ts: admin.firestore.FieldValue.serverTimestamp(),
         meta: req.body?.meta || null
       }).catch(err => console.error("[Stream log error]", err));
@@ -516,14 +525,22 @@ app.post("/api/ask/stream", async (req, res) => {
 
 // פונקציה עזר לבניית system prompt
 function buildSystemPrompt(ragContext) {
-  return `אתה עוזר סטטיסטיקה לסטודנטים בשם גלי-בוט. יש לך גישה למאגר חומרי קורס (RAG database) שמכיל חומרי לימוד שהועלו על ידי המרצים.
+  const basePrompt = `אתה עוזר סטטיסטיקה לסטודנטים בשם גלי-בוט. יש לך גישה למאגר חומרי קורס (RAG database) שמכיל חומרי לימוד שהועלו על ידי המרצים.
 
 ${ragContext && ragContext.context ? `המידע הבא מחומרי הקורס זמין לך:
 ${ragContext.context}
 
 השתמש במידע הזה כדי לענות על השאלות בצורה מדויקת ומקצועית.` : 'כרגע אין חומרי קורס זמינים במאגר, אבל אתה יכול לענות על בסיס הידע הכללי שלך.'}
 
-אם שואלים אותך על החומרים שיש לך במאגר, ציין את המקורות הרלוונטיים. ענה על השאלות בצורה ברורה ומקצועית.`;
+חשוב מאוד:
+1. אם שואלים אותך על החומרים שיש לך במאגר, תמיד ציין את המקורות הרלוונטיים (שם הקובץ/מקור).
+2. אם שואלים אותך "מה יש לך במאגר" או "תן לי את כל החומר", תן רשימה מפורטת של כל החומרים לפי סדר הלמידה שלהם, כולל שם המקור של כל חלק.
+3. אם שואלים אותך על נושא ספציפי, ציין תמיד מאיזה מקור (source) המידע נלקח.
+4. אתה יכול לגשת לכל החומרים במאגר - אין הגבלה על מה שאתה יכול לקרוא או לספק.
+
+ענה על השאלות בצורה ברורה ומקצועית.`;
+
+  return basePrompt;
 }
 
 // פונקציה עזר לבדיקת הרשאות (משותפת ל-/api/ask ו-/api/ask/stream)
@@ -822,6 +839,121 @@ process.on("unhandledRejection", (reason, promise) => {
 process.on("uncaughtException", (error) => {
   console.error("[Uncaught Exception]", error);
   // לא נסגור את השרת, רק נרישום את השגיאה
+});
+
+// Endpoint למחיקת כפילויות מהמאגר
+app.post("/api/remove-duplicates", async (req, res) => {
+  try {
+    const rawEmail = (req.body?.email || "").trim().toLowerCase();
+    if (!rawEmail) return res.status(400).json({ error: "email is required" });
+    if (!ragEnabled) return res.status(503).json({ error: "RAG is not enabled" });
+
+    // בדיקת הרשאות
+    const bypass = BYPASS_AUTH.toLowerCase() === "true";
+    if (!checkUploadAuth(rawEmail, bypass)) {
+      return res.status(403).json({ error: "Email not authorized" });
+    }
+
+    if (!firestoreDb) {
+      return res.status(500).json({ error: "Firestore not initialized" });
+    }
+
+    console.log("[Remove Duplicates] Starting duplicate removal...");
+
+    // קבלת כל ה-chunks
+    const chunksSnapshot = await firestoreDb.collection("rag_chunks").get();
+    console.log(`[Remove Duplicates] Found ${chunksSnapshot.size} total chunks`);
+
+    if (chunksSnapshot.empty) {
+      return res.json({ 
+        message: "No chunks found", 
+        deleted: 0, 
+        remaining: 0 
+      });
+    }
+
+    // יצירת Map לזיהוי כפילויות לפי טקסט
+    const textMap = new Map(); // text -> array of doc IDs
+    const chunksToDelete = [];
+
+    chunksSnapshot.forEach((doc) => {
+      const data = doc.data();
+      const text = (data.text || "").trim();
+      
+      if (!text) {
+        // מחק chunks ריקים
+        chunksToDelete.push(doc.id);
+        return;
+      }
+
+      // נרמול הטקסט (הסרת רווחים מיותרים) לזיהוי כפילויות
+      const normalizedText = text.replace(/\s+/g, " ").toLowerCase();
+      
+      if (!textMap.has(normalizedText)) {
+        textMap.set(normalizedText, []);
+      }
+      textMap.get(normalizedText).push({
+        id: doc.id,
+        source: data.source || "unknown",
+        text: text,
+        uploaded_at: data.uploaded_at || null
+      });
+    });
+
+    // זיהוי כפילויות - שמירה על הראשון, מחיקת השאר
+    let duplicatesCount = 0;
+    for (const [normalizedText, docs] of textMap.entries()) {
+      if (docs.length > 1) {
+        // מיון לפי תאריך העלאה (הישן יותר נשאר) או לפי שם מקור
+        docs.sort((a, b) => {
+          if (a.uploaded_at && b.uploaded_at) {
+            return new Date(a.uploaded_at) - new Date(b.uploaded_at);
+          }
+          return a.source.localeCompare(b.source);
+        });
+
+        // שמירה על הראשון, מחיקת השאר
+        for (let i = 1; i < docs.length; i++) {
+          chunksToDelete.push(docs[i].id);
+          duplicatesCount++;
+        }
+      }
+    }
+
+    console.log(`[Remove Duplicates] Found ${duplicatesCount} duplicate chunks to delete`);
+
+    // מחיקת כפילויות (בבאצ'ים של 500)
+    const batchSize = 500;
+    let deletedCount = 0;
+
+    for (let i = 0; i < chunksToDelete.length; i += batchSize) {
+      const batch = firestoreDb.batch();
+      const batchIds = chunksToDelete.slice(i, i + batchSize);
+      
+      for (const id of batchIds) {
+        batch.delete(firestoreDb.collection("rag_chunks").doc(id));
+      }
+      
+      await batch.commit();
+      deletedCount += batchIds.length;
+      console.log(`[Remove Duplicates] Deleted ${deletedCount}/${chunksToDelete.length} chunks`);
+    }
+
+    const remainingCount = chunksSnapshot.size - deletedCount;
+
+    console.log(`[Remove Duplicates] Completed: ${deletedCount} deleted, ${remainingCount} remaining`);
+
+    return res.json({
+      message: "Duplicates removed successfully",
+      deleted: deletedCount,
+      remaining: remainingCount,
+      duplicates_found: duplicatesCount
+    });
+
+  } catch (e) {
+    console.error("[/api/remove-duplicates error]", e);
+    return res.status(500).json({ error: "Server error", details: String(e) });
+  }
 });
 
 app.listen(PORT, () => {
