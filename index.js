@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 
 const {
   OPENAI_API_KEY,
-  OPENAI_MODEL = "gpt-4o-mini",
+  OPENAI_MODEL = "gpt-4o",
   FIREBASE_PROJECT_ID,
   FIREBASE_CLIENT_EMAIL,
   FIREBASE_PRIVATE_KEY,
