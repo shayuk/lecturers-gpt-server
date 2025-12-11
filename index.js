@@ -267,13 +267,13 @@ app.post("/api/ask", async (req, res) => {
       try {
         console.log(`[Ask] Querying RAG for prompt: "${prompt.substring(0, 50)}..."`);
         
-        // Promise עם timeout של 25 שניות
-        ragContext = await Promise.race([
-          getRAGContext(prompt, 5),
-          new Promise((_, reject) => 
-            setTimeout(() => reject(new Error("RAG query timeout")), 25000)
-          )
-        ]);
+        // Promise עם timeout של 20 שניות - מספיק זמן לשאילתה
+        const ragPromise = getRAGContext(prompt, 5);
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("RAG query timeout")), 20000)
+        );
+        
+        ragContext = await Promise.race([ragPromise, timeoutPromise]);
         
         const duration = ((Date.now() - ragStartTime) / 1000).toFixed(2);
         
@@ -284,7 +284,11 @@ app.post("/api/ask", async (req, res) => {
         }
       } catch (e) {
         const duration = ((Date.now() - ragStartTime) / 1000).toFixed(2);
-        console.error(`[RAG Query Error] after ${duration}s:`, e.message);
+        if (e.message === "RAG query timeout") {
+          console.warn(`[RAG] Query timed out after ${duration}s - continuing without RAG context`);
+        } else {
+          console.error(`[RAG Query Error] after ${duration}s:`, e.message);
+        }
         // ממשיכים גם אם RAG נכשל - הבוט יעבוד בלי RAG
         ragContext = null;
       }

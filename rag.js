@@ -151,7 +151,8 @@ export async function queryRAG(queryText, topK = 3) {
     const sources = [];
 
     for (const result of topResults) {
-      if (result.text && result.similarity > 0.1) { // הורדנו מ-0.3 ל-0.1
+      // הורדנו את ה-filter ל-0.05 כדי לקבל יותר תוצאות
+      if (result.text && result.similarity > 0.05) {
         chunks.push(result.text);
         sources.push({
           source: result.source,
@@ -162,7 +163,7 @@ export async function queryRAG(queryText, topK = 3) {
       }
     }
 
-    console.log(`[RAG] Returning ${chunks.length} chunks after filtering`);
+    console.log(`[RAG] Returning ${chunks.length} chunks after filtering (similarity > 0.05)`);
     return { chunks, sources };
   } catch (e) {
     console.error("[RAG Query Error]", e);
