@@ -15,6 +15,8 @@
 - `OPENAI_MODEL` – ברירת מחדל: gpt-4o-mini (אפשר לשנות לדגם אחר שיש לך גישה אליו).
 - `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` – פרטי Service Account.
 - `USE_RAG` – הפעלת RAG (ברירת מחדל: true).
+- `MAX_HISTORY_MESSAGES` – מספר ההודעות האחרונות לשימוש כ-context (ברירת מחדל: 20).
+- `MAX_STORED_MESSAGES_PER_USER` – מספר מקסימלי של הודעות לשמירה למשתמש (ברירת מחדל: 200).
 
 > הערה: ב־Render/Heroku יש לשים לב ש־`FIREBASE_PRIVATE_KEY` מכיל `\n` במקום שורות אמיתיות.
 
@@ -76,6 +78,41 @@ fetch('https://your-server.com/api/upload-course-material', {
 
 ### שימוש
 לאחר העלאת החומרים, הבוט ישתמש בהם אוטומטית בעת מענה על שאלות. התשובות יתבססו על חומרי הקורס שהועלו באמצעות חיפוש similarity ב-Firestore.
+
+## מערכת זיכרון לשיחות (Chat Memory)
+
+השרת תומך בשמירת היסטוריית השיחות של כל משתמש, כך שהבוט יכול לזכור את ההקשר מהשיחות הקודמות.
+
+### איך זה עובד
+
+1. **שמירה אוטומטית**: כל הודעה של המשתמש וכל תשובה של הבוט נשמרות ב-Firestore בקולקציה `chat_messages`.
+2. **טעינת היסטוריה**: לפני כל תשובה, הבוט טוען את ההודעות האחרונות של המשתמש (לפי `MAX_HISTORY_MESSAGES`) ומשתמש בהן כ-context.
+3. **ניקוי אוטומטי**: המערכת שומרת רק את ה-`MAX_STORED_MESSAGES_PER_USER` האחרונות לכל משתמש ומנקה הודעות ישנות אוטומטית.
+
+### מבנה הנתונים ב-Firestore
+
+קולקציה: `chat_messages`
+```javascript
+{
+  userId: "user@example.com",      // מזהה משתמש (email)
+  role: "user" | "assistant",      // תפקיד ההודעה
+  content: "תוכן ההודעה...",       // תוכן ההודעה
+  createdAt: Timestamp,            // זמן יצירה
+  // מטא-דאטה אופציונלי (sessionId, topic, etc.)
+}
+```
+
+### הגדרת משתני סביבה
+
+- `MAX_HISTORY_MESSAGES` – מספר ההודעות האחרונות לשימוש כ-context (ברירת מחדל: 20).
+- `MAX_STORED_MESSAGES_PER_USER` – מספר מקסימלי של הודעות לשמירה למשתמש (ברירת מחדל: 200).
+
+### הערות חשובות
+
+- המערכת עובדת אוטומטית – אין צורך בשינויים ב-frontend.
+- כל משתמש רואה רק את ההיסטוריה שלו (filtered by userId).
+- המערכת עובדת גם עם streaming וגם עם non-streaming endpoints.
+- אם Firestore לא זמין, המערכת תמשיך לעבוד ללא זיכרון (graceful degradation).
 
 ## Streaming API (תשובות בזמן אמת)
 

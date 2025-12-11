@@ -6,6 +6,8 @@ import OpenAI from "openai";
 import multer from "multer";
 import pdfParse from "pdf-parse";
 import { initRAG, getRAGContext, uploadDocumentToRAG } from "./rag.js";
+import { initChatMemory, saveChatMessage, getUserConversationHistory } from "./chatMemory.js";
+import { buildGalibotSystemPrompt } from "./galibotSystemPrompt.js";
 
 // ---------- ENV ----------
 const PORT = process.env.PORT || 3000;
@@ -23,7 +25,9 @@ const {
   API_SECRET,
   API_SECRET_ALLOW_BODY = "false",
   USE_RAG = "true",
-  ENABLE_STREAMING = "true"
+  ENABLE_STREAMING = "true",
+  MAX_HISTORY_MESSAGES = "20",
+  MAX_STORED_MESSAGES_PER_USER = "200"
 } = process.env;
 
 function normalizePrivateKey(raw) {
@@ -162,6 +166,16 @@ try {
 const db = admin.apps.length ? admin.firestore() : null;
 const firestoreDb = db; // alias for consistency with rag.js
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+// אתחול מערכת הזיכרון לצ'אט
+let chatMemoryEnabled = false;
+try {
+  chatMemoryEnabled = initChatMemory(firestoreDb);
+} catch (memoryInitError) {
+  console.error("[ChatMemory Init Error]", memoryInitError);
+  console.warn("[WARN] Continuing without chat memory due to initialization error");
+  chatMemoryEnabled = false;
+}
 
 // הגנה מפני בקשות כפולות - מטפל רק בבקשה אחת לכל קובץ בכל זמן
 const processingFiles = new Set();
@@ -353,19 +367,54 @@ app.post("/api/ask", async (req, res) => {
     }
 
     // בניית ה-prompt עם context מה-RAG
-    const systemPrompt = buildSystemPrompt(ragContext);
+    const systemPrompt = buildGalibotSystemPrompt(ragContext);
+    console.log(`[Ask] System prompt length: ${systemPrompt.length} characters`);
+    console.log(`[Ask] System prompt preview: ${systemPrompt.substring(0, 200)}...`);
     const userMessage = prompt;
+
+    // טעינת היסטוריית השיחה של המשתמש (אם מופעל)
+    let conversationHistory = [];
+    if (chatMemoryEnabled) {
+      try {
+        conversationHistory = await getUserConversationHistory(rawEmail);
+        console.log(`[Ask] Loaded ${conversationHistory.length} messages from conversation history`);
+      } catch (e) {
+        console.error("[Ask] Error loading conversation history:", e);
+        conversationHistory = [];
+      }
+    }
+
+    // בניית מערך ההודעות ל-OpenAI (system prompt + היסטוריה + הודעה חדשה)
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...conversationHistory, // היסטוריית השיחה
+      { role: "user", content: userMessage } // ההודעה החדשה
+    ];
+    
+    console.log(`[Ask] Sending ${messages.length} messages to OpenAI (1 system + ${conversationHistory.length} history + 1 user)`);
+    console.log(`[Ask] System message role: ${messages[0].role}, length: ${messages[0].content.length}`);
 
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage }
-      ],
+      messages: messages,
       temperature: 0.2
     });
 
     const answer = completion?.choices?.[0]?.message?.content?.trim() || "";
+
+    // שמירת ההודעות ב-memory (אם מופעל)
+    if (chatMemoryEnabled) {
+      try {
+        // שמירת הודעת המשתמש
+        await saveChatMessage(rawEmail, "user", prompt);
+        // שמירת תשובת הבוט
+        await saveChatMessage(rawEmail, "assistant", answer);
+        console.log(`[Ask] Saved user message and assistant response to memory`);
+      } catch (e) {
+        console.error("[Ask] Error saving messages to memory:", e);
+        // ממשיכים גם אם שמירת הזיכרון נכשלה
+      }
+    }
 
     if (db) {
       await db.collection("usage_logs").add({
@@ -527,16 +576,48 @@ async function handleStreamingRequest(req, res) {
     }
 
     // בניית ה-prompt
-    const systemPrompt = buildSystemPrompt(ragContext);
+    const systemPrompt = buildGalibotSystemPrompt(ragContext);
+    console.log(`[Stream] System prompt length: ${systemPrompt.length} characters`);
+    console.log(`[Stream] System prompt preview: ${systemPrompt.substring(0, 200)}...`);
     const userMessage = prompt;
+
+    // טעינת היסטוריית השיחה של המשתמש (אם מופעל)
+    let conversationHistory = [];
+    if (chatMemoryEnabled) {
+      try {
+        conversationHistory = await getUserConversationHistory(rawEmail);
+        console.log(`[Stream] Loaded ${conversationHistory.length} messages from conversation history`);
+      } catch (e) {
+        console.error("[Stream] Error loading conversation history:", e);
+        conversationHistory = [];
+      }
+    }
+
+    // בניית מערך ההודעות ל-OpenAI (system prompt + היסטוריה + הודעה חדשה)
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...conversationHistory, // היסטוריית השיחה
+      { role: "user", content: userMessage } // ההודעה החדשה
+    ];
+    
+    console.log(`[Stream] Sending ${messages.length} messages to OpenAI (1 system + ${conversationHistory.length} history + 1 user)`);
+    console.log(`[Stream] System message role: ${messages[0].role}, length: ${messages[0].content.length}`);
+
+    // שמירת הודעת המשתמש ב-memory (לפני יצירת התשובה)
+    if (chatMemoryEnabled) {
+      try {
+        await saveChatMessage(rawEmail, "user", prompt);
+        console.log(`[Stream] Saved user message to memory`);
+      } catch (e) {
+        console.error("[Stream] Error saving user message to memory:", e);
+        // ממשיכים גם אם שמירת הזיכרון נכשלה
+      }
+    }
 
     // יצירת streaming completion - OpenAI מחזיר stream של tokens
     const stream = await openai.chat.completions.create({
       model: OPENAI_MODEL,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage }
-      ],
+      messages: messages,
       temperature: 0.2,
       stream: true // הפעלת streaming mode
     });
@@ -602,6 +683,17 @@ async function handleStreamingRequest(req, res) {
       }
     }
 
+    // שמירת התשובה המלאה ב-memory (אם מופעל)
+    if (chatMemoryEnabled && fullAnswer.trim()) {
+      try {
+        await saveChatMessage(rawEmail, "assistant", fullAnswer.trim());
+        console.log(`[Stream] Saved assistant response to memory (${fullAnswer.length} chars)`);
+      } catch (e) {
+        console.error("[Stream] Error saving assistant response to memory:", e);
+        // ממשיכים גם אם שמירת הזיכרון נכשלה
+      }
+    }
+
     // שליחת הודעה על סיום ה-stream
     try {
       res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
@@ -650,25 +742,9 @@ app.post("/api/ask/stream", async (req, res) => {
   return handleStreamingRequest(req, res);
 });
 
-// פונקציה עזר לבניית system prompt
-function buildSystemPrompt(ragContext) {
-  const basePrompt = `אתה עוזר סטטיסטיקה לסטודנטים בשם גלי-בוט. יש לך גישה למאגר חומרי קורס (RAG database) שמכיל חומרי לימוד שהועלו על ידי המרצים.
-
-${ragContext && ragContext.context ? `המידע הבא מחומרי הקורס זמין לך:
-${ragContext.context}
-
-השתמש במידע הזה כדי לענות על השאלות בצורה מדויקת ומקצועית.` : 'כרגע אין חומרי קורס זמינים במאגר, אבל אתה יכול לענות על בסיס הידע הכללי שלך.'}
-
-חשוב מאוד:
-1. אם שואלים אותך על החומרים שיש לך במאגר, תמיד ציין את המקורות הרלוונטיים (שם הקובץ/מקור).
-2. אם שואלים אותך "מה יש לך במאגר" או "תן לי את כל החומר", תן רשימה מפורטת של כל החומרים לפי סדר הלמידה שלהם, כולל שם המקור של כל חלק.
-3. אם שואלים אותך על נושא ספציפי, ציין תמיד מאיזה מקור (source) המידע נלקח.
-4. אתה יכול לגשת לכל החומרים במאגר - אין הגבלה על מה שאתה יכול לקרוא או לספק.
-
-ענה על השאלות בצורה ברורה ומקצועית.`;
-
-  return basePrompt;
-}
+// Note: buildSystemPrompt has been replaced by buildGalibotSystemPrompt from galibotSystemPrompt.js
+// This function is kept for backward compatibility but is no longer used
+// The new system prompt is comprehensive and includes all Galibot behavior rules
 
 // פונקציה עזר לבדיקת הרשאות (משותפת ל-/api/ask ו-/api/ask/stream)
 async function checkAuthAndGetRAG(rawEmail, prompt, bypass) {
