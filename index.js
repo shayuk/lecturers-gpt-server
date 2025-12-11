@@ -263,23 +263,28 @@ app.post("/api/ask", async (req, res) => {
     // שאילתה ב-RAG אם מופעל (עם timeout)
     let ragContext = null;
     if (ragEnabled) {
+      const ragStartTime = Date.now();
       try {
         console.log(`[Ask] Querying RAG for prompt: "${prompt.substring(0, 50)}..."`);
-        // Promise עם timeout של 30 שניות (הוגדל משמעותית)
-        const ragPromise = getRAGContext(prompt, 5); // הוגדל ל-5 chunks במקום 3
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error("RAG query timeout")), 30000)
-        );
         
-        ragContext = await Promise.race([ragPromise, timeoutPromise]);
+        // Promise עם timeout של 25 שניות
+        ragContext = await Promise.race([
+          getRAGContext(prompt, 5),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error("RAG query timeout")), 25000)
+          )
+        ]);
+        
+        const duration = ((Date.now() - ragStartTime) / 1000).toFixed(2);
         
         if (ragContext && ragContext.context) {
-          console.log(`[Ask] RAG found ${ragContext.chunksCount} relevant chunks`);
+          console.log(`[Ask] RAG found ${ragContext.chunksCount} relevant chunks in ${duration}s`);
         } else {
-          console.log("[Ask] RAG returned no context");
+          console.log(`[Ask] RAG returned no context after ${duration}s`);
         }
       } catch (e) {
-        console.error("[RAG Query Error]", e);
+        const duration = ((Date.now() - ragStartTime) / 1000).toFixed(2);
+        console.error(`[RAG Query Error] after ${duration}s:`, e.message);
         // ממשיכים גם אם RAG נכשל - הבוט יעבוד בלי RAG
         ragContext = null;
       }

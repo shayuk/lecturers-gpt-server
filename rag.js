@@ -72,8 +72,8 @@ export async function queryRAG(queryText, topK = 3) {
     const queryEmbedding = await createEmbedding(queryText);
     console.log(`[RAG] Created query embedding, dimension: ${queryEmbedding.length}`);
 
-    // קבלת כל ה-chunks מ-Firestore עם הגבלה (מקסימום 1000 כדי לא להעמיס על הזיכרון)
-    const chunksSnapshot = await firestoreDb.collection("rag_chunks").limit(1000).get();
+    // קבלת כל ה-chunks מ-Firestore עם הגבלה (מקסימום 500 כדי לשפר ביצועים)
+    const chunksSnapshot = await firestoreDb.collection("rag_chunks").limit(500).get();
     console.log(`[RAG] Found ${chunksSnapshot.size} chunks in database`);
     
     if (chunksSnapshot.empty) {
@@ -84,36 +84,40 @@ export async function queryRAG(queryText, topK = 3) {
     // חישוב similarity לכל chunk (עם הגבלת זמן)
     const similarities = [];
     const startTime = Date.now();
-    const MAX_PROCESSING_TIME = 25000; // 25 שניות מקסימום (הוגדל משמעותית)
+    const MAX_PROCESSING_TIME = 20000; // 20 שניות מקסימום
     let processedCount = 0;
     let skippedCount = 0;
     
-    chunksSnapshot.forEach((doc) => {
+    // המרה ל-array כדי לשפר ביצועים
+    const chunksArray = chunksSnapshot.docs;
+    
+    for (let i = 0; i < chunksArray.length; i++) {
       // בדיקת timeout - רק אם עבר הרבה זמן
       if (Date.now() - startTime > MAX_PROCESSING_TIME) {
         console.warn(`[RAG] Query timeout after ${processedCount} chunks - stopping similarity calculation`);
-        return;
+        break;
       }
 
+      const doc = chunksArray[i];
       const data = doc.data();
       const chunkEmbedding = data.embedding;
       
       if (!chunkEmbedding) {
         skippedCount++;
-        return;
+        continue;
       }
       
       if (!Array.isArray(chunkEmbedding)) {
         console.warn(`[RAG] Chunk ${doc.id} has invalid embedding type: ${typeof chunkEmbedding}`);
         skippedCount++;
-        return;
+        continue;
       }
       
       // בדיקת dimension
       if (chunkEmbedding.length !== queryEmbedding.length) {
         console.warn(`[RAG] Chunk ${doc.id} dimension mismatch: ${chunkEmbedding.length} vs ${queryEmbedding.length}`);
         skippedCount++;
-        return;
+        continue;
       }
       
       try {
@@ -132,7 +136,7 @@ export async function queryRAG(queryText, topK = 3) {
         console.warn(`[RAG] Error calculating similarity for chunk ${doc.id}:`, simError);
         skippedCount++;
       }
-    });
+    }
 
     console.log(`[RAG] Processed ${processedCount} chunks, skipped ${skippedCount}`);
 
