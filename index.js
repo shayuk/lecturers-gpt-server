@@ -372,8 +372,10 @@ app.post("/api/upload-course-material", upload.array("pdf", 10), handleMulterErr
 
           const source = file.originalname || "uploaded.pdf";
           console.log(`[PDF] Extracted ${pdfText.length} characters from PDF: ${source}`);
+          console.log(`[Upload] Starting RAG upload for ${source}...`);
 
           // העלאת הטקסט ל-RAG
+          const uploadStartTime = Date.now();
           const result = await uploadDocumentToRAG(pdfText, {
             source,
             course_name: courseName,
@@ -381,6 +383,8 @@ app.post("/api/upload-course-material", upload.array("pdf", 10), handleMulterErr
             uploaded_at: new Date().toISOString(),
             file_type: "pdf",
           });
+          const uploadDuration = ((Date.now() - uploadStartTime) / 1000).toFixed(2);
+          console.log(`[Upload] Completed RAG upload for ${source} in ${uploadDuration}s`);
 
           // לוג ב-Firestore
           if (db) {

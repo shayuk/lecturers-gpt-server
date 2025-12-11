@@ -132,29 +132,43 @@ export async function uploadDocumentToRAG(text, metadata = {}) {
   try {
     // חלוקה לקטעים (chunks)
     const chunks = splitTextIntoChunks(text, 500, 100); // 500 תווים, 100 overlap
+    console.log(`[RAG] Split text into ${chunks.length} chunks`);
 
     let uploadedCount = 0;
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
-      const embedding = await createEmbedding(chunk);
+      
+      // יצירת embedding
+      try {
+        const embedding = await createEmbedding(chunk);
+        
+        // שמירה ב-Firestore
+        await firestoreDb.collection("rag_chunks").add({
+          text: chunk,
+          embedding: embedding,
+          chunk_index: i,
+          source: metadata.source || "unknown",
+          course_name: metadata.course_name || "statistics",
+          uploaded_by: metadata.uploaded_by || "",
+          uploaded_at: metadata.uploaded_at || new Date().toISOString(),
+          metadata: {
+            ...metadata,
+            total_chunks: chunks.length,
+          },
+        });
 
-      // שמירה ב-Firestore
-      await firestoreDb.collection("rag_chunks").add({
-        text: chunk,
-        embedding: embedding,
-        chunk_index: i,
-        source: metadata.source || "unknown",
-        course_name: metadata.course_name || "statistics",
-        uploaded_by: metadata.uploaded_by || "",
-        uploaded_at: metadata.uploaded_at || new Date().toISOString(),
-        metadata: {
-          ...metadata,
-          total_chunks: chunks.length,
-        },
-      });
-
-      uploadedCount++;
+        uploadedCount++;
+        
+        // Log progress כל 10 chunks
+        if ((i + 1) % 10 === 0 || i === chunks.length - 1) {
+          console.log(`[RAG] Progress: ${i + 1}/${chunks.length} chunks uploaded`);
+        }
+      } catch (chunkError) {
+        console.error(`[RAG] Error processing chunk ${i + 1}:`, chunkError);
+        // ממשיכים עם ה-chunk הבא
+        continue;
+      }
     }
 
     console.log(`[RAG] Uploaded ${uploadedCount} chunks to Firestore`);
