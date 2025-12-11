@@ -138,13 +138,19 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // אתחול RAG
 let ragEnabled = false;
-if (USE_RAG.toLowerCase() === "true") {
-  ragEnabled = initRAG(OPENAI_API_KEY, db);
-  if (ragEnabled) {
-    console.log("[OK] RAG enabled with Firestore");
-  } else {
-    console.warn("[WARN] RAG disabled - missing OpenAI API key or Firestore");
+try {
+  if (USE_RAG.toLowerCase() === "true") {
+    ragEnabled = initRAG(OPENAI_API_KEY, db);
+    if (ragEnabled) {
+      console.log("[OK] RAG enabled with Firestore");
+    } else {
+      console.warn("[WARN] RAG disabled - missing OpenAI API key or Firestore");
+    }
   }
+} catch (ragInitError) {
+  console.error("[RAG Init Error]", ragInitError);
+  console.warn("[WARN] Continuing without RAG due to initialization error");
+  ragEnabled = false;
 }
 
 function splitCsvLower(v) {
@@ -470,6 +476,28 @@ app.post("/api/upload-course-material", upload.array("pdf", 10), handleMulterErr
     console.error("[/api/upload-course-material error]", e);
     return res.status(500).json({ error: "Server error", details: String(e) });
   }
+});
+
+// Error handler כללי למניעת קריסת השרת
+app.use((err, req, res, next) => {
+  console.error("[Global Error Handler]", err);
+  if (!res.headersSent) {
+    res.status(500).json({ 
+      error: "Internal server error", 
+      details: process.env.NODE_ENV === "development" ? String(err) : undefined 
+    });
+  }
+});
+
+// Unhandled promise rejection handler
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[Unhandled Rejection]", reason);
+});
+
+// Uncaught exception handler
+process.on("uncaughtException", (error) => {
+  console.error("[Uncaught Exception]", error);
+  // לא נסגור את השרת, רק נרישום את השגיאה
 });
 
 app.listen(PORT, () => {
