@@ -81,7 +81,11 @@ fetch('https://your-server.com/api/upload-course-material', {
 
 השרת תומך ב-streaming של תשובות באמצעות Server-Sent Events (SSE), כך שהתשובה מופיעה token-by-token בזמן אמת במקום להמתין לכל התשובה.
 
-### Endpoint: `/api/ask/stream`
+### Endpoints:
+
+1. **`/api/ask/stream`** - Streaming endpoint ייעודי
+2. **`/api/ask?stream=true`** - אפשרות להשתמש ב-query parameter
+3. **`/api/ask`** עם `stream: true` ב-body או `x-stream: true` ב-headers
 
 שולח POST request עם:
 ```json
@@ -93,6 +97,7 @@ fetch('https://your-server.com/api/upload-course-material', {
 
 התגובה היא SSE stream עם events:
 - `{"type":"token","content":"..."}` - כל token של התשובה
+- `{"type":"sources","sources":[...]}` - מקורות מ-RAG (אם קיימים)
 - `{"type":"done"}` - סיום התשובה
 - `{"type":"error","message":"..."}` - שגיאה
 

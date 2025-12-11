@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>דוגמה ל-Streaming עם GaliBot</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .chat-container {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .message {
+            margin: 15px 0;
+            padding: 12px;
+            border-radius: 8px;
+            max-width: 80%;
+        }
+        .user-message {
+            background: #007bff;
+            color: white;
+            margin-right: auto;
+            text-align: right;
+        }
+        .bot-message {
+            background: #e9ecef;
+            color: #333;
+            margin-left: auto;
+            text-align: right;
+            white-space: pre-wrap;
+        }
+        .input-container {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        input {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        button {
+            padding: 12px 24px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 8px;
+            background: #fff3cd;
+            border-radius: 5px;
+            font-size: 14px;
+            display: none;
+        }
+        .status.streaming {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <h1>GaliBot - דוגמה ל-Streaming</h1>
+        <div id="chatMessages"></div>
+        <div class="status" id="status">ממתין לתשובה...</div>
+        <div class="input-container">
+            <input type="email" id="emailInput" placeholder="הכנסי כתובת מייל" value="test@ariel.ac.il">
+            <input type="text" id="messageInput" placeholder="כתבי שאלה כאן..." onkeypress="handleKeyPress(event)">
+            <button id="sendButton" onclick="sendMessage()">שלח</button>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'https://lecturers-gpt-server.onrender.com/api/ask/stream';
+        // או להשתמש ב: const API_URL = 'https://lecturers-gpt-server.onrender.com/api/ask?stream=true';
+
+        let currentBotMessage = null;
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        async function sendMessage() {
+            const email = document.getElementById('emailInput').value.trim();
+            const prompt = document.getElementById('messageInput').value.trim();
+            const sendButton = document.getElementById('sendButton');
+            const status = document.getElementById('status');
+
+            if (!email || !prompt) {
+                alert('אנא מלאי את המייל והשאלה');
+                return;
+            }
+
+            // הוספת הודעת המשתמש
+            addMessage('user', prompt);
+            document.getElementById('messageInput').value = '';
+            sendButton.disabled = true;
+            status.textContent = 'ממתין לתשובה...';
+            status.classList.add('streaming');
+
+            // יצירת הודעת בוט ריקה
+            currentBotMessage = addMessage('bot', '');
+
+            try {
+                // קריאה ל-streaming endpoint
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ email, prompt })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                // קריאת ה-stream
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let fullAnswer = '';
+                let sources = null;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); // שמירת השורה האחרונה שלא הושלמה
+
+                    for (const line of lines) {
+                        if (line.trim() === '') continue;
+                        
+                        // טיפול ב-SSE format
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.slice(6));
+                                
+                                if (data.type === 'token') {
+                                    fullAnswer += data.content;
+                                    // עדכון ה-UI עם התשובה החלקית
+                                    updateBotMessage(fullAnswer);
+                                } else if (data.type === 'sources') {
+                                    sources = data.sources;
+                                    console.log('Sources received:', sources);
+                                } else if (data.type === 'done') {
+                                    // הוספת sources אם קיימים
+                                    if (sources && sources.length > 0) {
+                                        const sourcesText = '\n\nמקורות:\n' + sources.map((s, i) => 
+                                            `${i + 1}. ${s.source} (דמיון: ${(s.score * 100).toFixed(1)}%)`
+                                        ).join('\n');
+                                        updateBotMessage(fullAnswer + sourcesText);
+                                    }
+                                    status.classList.remove('streaming');
+                                    sendButton.disabled = false;
+                                    return;
+                                } else if (data.type === 'error') {
+                                    throw new Error(data.message);
+                                }
+                            } catch (e) {
+                                console.error('Parse error:', e, 'Line:', line);
+                            }
+                        } else if (line.startsWith(': ')) {
+                            // Comment line - ignore
+                            continue;
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                updateBotMessage('שגיאה: ' + error.message);
+                status.classList.remove('streaming');
+                sendButton.disabled = false;
+            }
+        }
+
+        function addMessage(type, text) {
+            const messagesDiv = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}-message`;
+            messageDiv.textContent = text;
+            messagesDiv.appendChild(messageDiv);
+            messageDiv.scrollIntoView({ behavior: 'smooth' });
+            return messageDiv;
+        }
+
+        function updateBotMessage(text) {
+            if (currentBotMessage) {
+                currentBotMessage.textContent = text;
+                currentBotMessage.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+    </script>
+</body>
+</html>
+
