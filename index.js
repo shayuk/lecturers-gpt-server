@@ -16,42 +16,39 @@ import { buildGalibotSystemPrompt } from "./galibotSystemPrompt.js";
  * @returns {string} - Cleaned text with properly formatted LaTeX
  */
 function cleanLaTeXFormulas(text) {
-  if (!text || typeof text !== 'string') return text;
-  
-  let cleaned = text;
-  
-  // Remove triple or more dollar signs ($$$, $$$$, etc.)
-  cleaned = cleaned.replace(/\$\$\$+/g, '$$');
-  
-  // Fix escaped dollar signs that should be regular dollars
-  cleaned = cleaned.replace(/\\\$/g, '$');
-  
-  // Convert \[...\] to $$...$$ (display math)
-  cleaned = cleaned.replace(/\\\[([^\]]+)\\\]/g, '$$$1$$');
-  
-  // Remove trailing $ signs that appear incorrectly
-  cleaned = cleaned.replace(/\$\s*$/gm, '');
-  
-  // Fix malformed combinations like $\$$ or $$$\$$
-  cleaned = cleaned.replace(/\$\$?\$+/g, '$$');
-  
-  // Clean up extra spaces within formulas
-  cleaned = cleaned.replace(/\$\$\s+/g, '$$');
-  cleaned = cleaned.replace(/\s+\$\$/g, '$$');
-  
-  // Ensure inline formulas use \( \) format (but keep $$ for display)
-  // Don't change display math blocks ($$...$$)
-  // This regex finds inline $...$ that aren't part of $$...$$
-  cleaned = cleaned.replace(/(?<!\$)\$(?!\$)([^$\n]+?)(?<!\$)\$(?!\$)/g, '\\($1\\)');
-  
-  // Fix common LaTeX command issues
-  cleaned = cleaned.replace(/\\\\frac/g, '\\frac');
-  cleaned = cleaned.replace(/\\\\sqrt/g, '\\sqrt');
-  cleaned = cleaned.replace(/\\\\mu/g, '\\mu');
-  cleaned = cleaned.replace(/\\\\sigma/g, '\\sigma');
-  cleaned = cleaned.replace(/\\\\bar/g, '\\bar');
-  
-  return cleaned;
+  if (!text || typeof text !== "string") return text;
+
+  let s = text;
+
+  // 1) איחוד $$$...$$$ / $$$\$... לתחביר נורמלי
+  s = s.replace(/\$\$\$\\\$/g, "$$");
+  s = s.replace(/\$\$\$+/g, "$$");
+
+  // 2) המרה של \[...\] ל- $$...$$
+  s = s.replace(/\\\[\s*([\s\S]*?)\s*\\\]/g, "$$ $1 $$");
+
+  // 3) ניקוי $ בודד שנשאר בשורה לבד (הכי נפוץ בבלאגן שראית)
+  s = s.replace(/^\s*\$\s*$/gm, "");
+
+  // 4) תיקון מקרים של $$ ... $  (סוגר חסר)
+  //    הופך $$ ... $ ל- $$ ... $$
+  s = s.replace(/\$\$\s*([\s\S]*?)\s*\$(?!\$)/g, "$$ $1 $$");
+
+  // 5) אם יש עדיין $...$ (אינליין), נהפוך ל- \( ... \)
+  //    אבל רק אם זה לא $$...$$
+  s = s.replace(/(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)/g, "\\($1\\)");
+
+  // 6) תיקון עטיפה כפולה: \( \( ... \) \) => \( ... \)
+  s = s.replace(/\\\(\\\(([\s\S]*?)\\\)\\\)/g, "\\($1\\)");
+
+  // 7) ניקוי backslashes כפולים בפקודות נפוצות
+  s = s.replace(/\\\\(frac|sqrt|sum|mu|sigma|bar|int|prod|lim)/g, "\\$1");
+
+  // 8) ניקוי רווחים פנימיים מיותרים ב-$$
+  s = s.replace(/\$\$\s+/g, "$$ ");
+  s = s.replace(/\s+\$\$/g, " $$");
+
+  return s.trim();
 }
 
 // ---------- ENV ----------
