@@ -81,12 +81,11 @@ export async function getUserConversationHistory(userId, limit = MAX_HISTORY_MES
   try {
     const normalizedUserId = userId.toLowerCase().trim();
     
-    // טעינת ההודעות האחרונות של המשתמש, ממוינות לפי זמן (הכי ישן ראשון)
+    // טעינת ההודעות של המשתמש - ללא orderBy כדי להימנע מדרישת אינדקס
+    // נטען את כל ההודעות ונמיין ב-JavaScript
     const snapshot = await firestoreDb
       .collection("chat_messages")
       .where("userId", "==", normalizedUserId)
-      .orderBy("createdAt", "asc")
-      .limit(MAX_STORED_MESSAGES_PER_USER) // נטען יותר כדי לסנן אחר כך
       .get();
 
     if (snapshot.empty) {
@@ -95,13 +94,20 @@ export async function getUserConversationHistory(userId, limit = MAX_HISTORY_MES
     }
 
     // המרה ל-array וממיון לפי זמן (הכי ישן ראשון)
-    let messages = snapshot.docs.map(doc => {
-      const data = doc.data();
-      return {
-        role: data.role, // "user" או "assistant"
-        content: data.content
-      };
-    });
+    let messages = snapshot.docs
+      .map(doc => {
+        const data = doc.data();
+        return {
+          role: data.role, // "user" או "assistant"
+          content: data.content,
+          createdAt: data.createdAt ? data.createdAt.toMillis() : 0 // המרה ל-timestamp למיון
+        };
+      })
+      .sort((a, b) => a.createdAt - b.createdAt) // מיון לפי זמן (ישן → חדש)
+      .map(msg => ({
+        role: msg.role,
+        content: msg.content
+      })); // הסרת createdAt מהתוצאה הסופית
 
     // לוקח רק את ה-limit האחרונות (אם יש יותר מ-limit)
     if (messages.length > limit) {
@@ -109,9 +115,14 @@ export async function getUserConversationHistory(userId, limit = MAX_HISTORY_MES
     }
 
     console.log(`[ChatMemory] Loaded ${messages.length} messages for user ${normalizedUserId.substring(0, 10)}...`);
+    if (messages.length > 0) {
+      console.log(`[ChatMemory] First message: ${messages[0].role} - ${messages[0].content.substring(0, 50)}...`);
+      console.log(`[ChatMemory] Last message: ${messages[messages.length - 1].role} - ${messages[messages.length - 1].content.substring(0, 50)}...`);
+    }
     return messages;
   } catch (error) {
     console.error("[ChatMemory] Error loading conversation history:", error);
+    console.error("[ChatMemory] Error details:", error.message);
     return [];
   }
 }
@@ -126,29 +137,48 @@ async function cleanupOldMessages(userId) {
   try {
     const normalizedUserId = userId.toLowerCase().trim();
     
-    // טעינת כל ההודעות של המשתמש
+    // טעינת כל ההודעות של המשתמש - ללא orderBy כדי להימנע מדרישת אינדקס
     const snapshot = await firestoreDb
       .collection("chat_messages")
       .where("userId", "==", normalizedUserId)
-      .orderBy("createdAt", "desc")
       .get();
 
     if (snapshot.size <= MAX_STORED_MESSAGES_PER_USER) {
       return; // אין צורך בניקוי
     }
 
-    // מחיקת ההודעות הישנות ביותר (מעבר ל-MAX_STORED_MESSAGES_PER_USER)
-    const messagesToDelete = snapshot.docs.slice(MAX_STORED_MESSAGES_PER_USER);
-    const batch = firestoreDb.batch();
-    
-    messagesToDelete.forEach(doc => {
-      batch.delete(doc.ref);
-    });
+    // מיון ב-JavaScript לפי זמן (הכי חדש ראשון)
+    const sortedDocs = snapshot.docs
+      .map(doc => ({
+        doc,
+        createdAt: doc.data().createdAt ? doc.data().createdAt.toMillis() : 0
+      }))
+      .sort((a, b) => b.createdAt - a.createdAt); // מיון יורד (חדש → ישן)
 
-    await batch.commit();
+    // מחיקת ההודעות הישנות ביותר (מעבר ל-MAX_STORED_MESSAGES_PER_USER)
+    const messagesToDelete = sortedDocs.slice(MAX_STORED_MESSAGES_PER_USER);
+    
+    if (messagesToDelete.length === 0) {
+      return;
+    }
+
+    // מחיקה בבאצ'ים של 500 (מגבלת Firestore)
+    const batchSize = 500;
+    for (let i = 0; i < messagesToDelete.length; i += batchSize) {
+      const batch = firestoreDb.batch();
+      const batchDocs = messagesToDelete.slice(i, i + batchSize);
+      
+      batchDocs.forEach(({ doc }) => {
+        batch.delete(doc.ref);
+      });
+      
+      await batch.commit();
+    }
+    
     console.log(`[ChatMemory] Cleaned up ${messagesToDelete.length} old messages for user ${normalizedUserId.substring(0, 10)}...`);
   } catch (error) {
     console.error("[ChatMemory] Error cleaning up old messages:", error);
+    console.error("[ChatMemory] Cleanup error details:", error.message);
     // לא נזרוק שגיאה - זה לא קריטי
   }
 }
