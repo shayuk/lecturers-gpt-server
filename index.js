@@ -9,6 +9,51 @@ import { initRAG, getRAGContext, uploadDocumentToRAG } from "./rag.js";
 import { initChatMemory, saveChatMessage, getUserConversationHistory } from "./chatMemory.js";
 import { buildGalibotSystemPrompt } from "./galibotSystemPrompt.js";
 
+/**
+ * Cleans and normalizes LaTeX formulas in the bot's response
+ * Removes malformed dollar signs and ensures proper LaTeX formatting
+ * @param {string} text - The text containing LaTeX formulas
+ * @returns {string} - Cleaned text with properly formatted LaTeX
+ */
+function cleanLaTeXFormulas(text) {
+  if (!text || typeof text !== 'string') return text;
+  
+  let cleaned = text;
+  
+  // Remove triple or more dollar signs ($$$, $$$$, etc.)
+  cleaned = cleaned.replace(/\$\$\$+/g, '$$');
+  
+  // Fix escaped dollar signs that should be regular dollars
+  cleaned = cleaned.replace(/\\\$/g, '$');
+  
+  // Convert \[...\] to $$...$$ (display math)
+  cleaned = cleaned.replace(/\\\[([^\]]+)\\\]/g, '$$$1$$');
+  
+  // Remove trailing $ signs that appear incorrectly
+  cleaned = cleaned.replace(/\$\s*$/gm, '');
+  
+  // Fix malformed combinations like $\$$ or $$$\$$
+  cleaned = cleaned.replace(/\$\$?\$+/g, '$$');
+  
+  // Clean up extra spaces within formulas
+  cleaned = cleaned.replace(/\$\$\s+/g, '$$');
+  cleaned = cleaned.replace(/\s+\$\$/g, '$$');
+  
+  // Ensure inline formulas use \( \) format (but keep $$ for display)
+  // Don't change display math blocks ($$...$$)
+  // This regex finds inline $...$ that aren't part of $$...$$
+  cleaned = cleaned.replace(/(?<!\$)\$(?!\$)([^$\n]+?)(?<!\$)\$(?!\$)/g, '\\($1\\)');
+  
+  // Fix common LaTeX command issues
+  cleaned = cleaned.replace(/\\\\frac/g, '\\frac');
+  cleaned = cleaned.replace(/\\\\sqrt/g, '\\sqrt');
+  cleaned = cleaned.replace(/\\\\mu/g, '\\mu');
+  cleaned = cleaned.replace(/\\\\sigma/g, '\\sigma');
+  cleaned = cleaned.replace(/\\\\bar/g, '\\bar');
+  
+  return cleaned;
+}
+
 // ---------- ENV ----------
 const PORT = process.env.PORT || 3000;
 
@@ -379,10 +424,15 @@ app.post("/api/ask", async (req, res) => {
       try {
         conversationHistory = await getUserConversationHistory(rawEmail);
         console.log(`[Ask] Loaded ${conversationHistory.length} messages from conversation history`);
+        if (conversationHistory.length > 0) {
+          console.log(`[Ask] Conversation history preview: ${JSON.stringify(conversationHistory.slice(0, 2))}`);
+        }
       } catch (e) {
         console.error("[Ask] Error loading conversation history:", e);
         conversationHistory = [];
       }
+    } else {
+      console.log(`[Ask] Chat memory is disabled - conversation history will not be used`);
     }
 
     // בניית מערך ההודעות ל-OpenAI (system prompt + היסטוריה + הודעה חדשה)
@@ -410,7 +460,11 @@ app.post("/api/ask", async (req, res) => {
       temperature: 0.2
     });
 
-    const answer = completion?.choices?.[0]?.message?.content?.trim() || "";
+    let answer = completion?.choices?.[0]?.message?.content?.trim() || "";
+    
+    // ניקוי נוסחאות LaTeX לפני שליחת התשובה
+    answer = cleanLaTeXFormulas(answer);
+    console.log(`[Ask] Cleaned LaTeX formulas in answer (length: ${answer.length})`);
 
     // שמירת ההודעות ב-memory (אם מופעל)
     if (chatMemoryEnabled) {
@@ -598,10 +652,15 @@ async function handleStreamingRequest(req, res) {
       try {
         conversationHistory = await getUserConversationHistory(rawEmail);
         console.log(`[Stream] Loaded ${conversationHistory.length} messages from conversation history`);
+        if (conversationHistory.length > 0) {
+          console.log(`[Stream] Conversation history preview: ${JSON.stringify(conversationHistory.slice(0, 2))}`);
+        }
       } catch (e) {
         console.error("[Stream] Error loading conversation history:", e);
         conversationHistory = [];
       }
+    } else {
+      console.log(`[Stream] Chat memory is disabled - conversation history will not be used`);
     }
 
     // בניית מערך ההודעות ל-OpenAI (system prompt + היסטוריה + הודעה חדשה)
@@ -661,7 +720,9 @@ async function handleStreamingRequest(req, res) {
         if (content) {
           fullAnswer += content;
           tokenCount++;
+          
           // שליחת token דרך SSE - כל token נשלח מיד כשהוא מגיע
+          // ניקוי LaTeX יבוצע בסוף ה-stream על כל התשובה המלאה
           const tokenData = JSON.stringify({ type: "token", content });
           try {
             res.write(`data: ${tokenData}\n\n`);
@@ -692,6 +753,10 @@ async function handleStreamingRequest(req, res) {
     }
     
     console.log(`[Stream] Completed: ${tokenCount} tokens sent`);
+    
+    // ניקוי סופי של כל התשובה לפני שמירה ב-memory
+    fullAnswer = cleanLaTeXFormulas(fullAnswer);
+    console.log(`[Stream] Cleaned LaTeX formulas in final answer (length: ${fullAnswer.length})`);
 
     // שליחת sources אם קיימים (לפני סיום ה-stream)
     if (ragContext && ragContext.sources && ragContext.sources.length > 0) {
@@ -703,11 +768,13 @@ async function handleStreamingRequest(req, res) {
       }
     }
 
-    // שמירת התשובה המלאה ב-memory (אם מופעל)
+    // שמירת התשובה המלאה ב-memory (אם מופעל) - עם ניקוי LaTeX
     if (chatMemoryEnabled && fullAnswer.trim()) {
       try {
-        await saveChatMessage(rawEmail, "assistant", fullAnswer.trim());
-        console.log(`[Stream] Saved assistant response to memory (${fullAnswer.length} chars)`);
+        // ניקוי LaTeX לפני שמירה ב-memory
+        const cleanedAnswer = cleanLaTeXFormulas(fullAnswer.trim());
+        await saveChatMessage(rawEmail, "assistant", cleanedAnswer);
+        console.log(`[Stream] Saved assistant response to memory (${cleanedAnswer.length} chars, LaTeX cleaned)`);
       } catch (e) {
         console.error("[Stream] Error saving assistant response to memory:", e);
         // ממשיכים גם אם שמירת הזיכרון נכשלה
