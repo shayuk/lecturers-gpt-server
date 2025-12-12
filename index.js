@@ -293,37 +293,37 @@ app.post("/api/ask", async (req, res) => {
           });
         }
         return res.status(403).json({ error: "Email not authorized (domain/list)" });
-      }
+    }
 
       // בדיקת Firebase Auth רק אם המייל לא ברשימת ALLOWED_EMAILS
       if (!emailInWhitelist) {
-        if (!admin.apps.length) return res.status(500).json({ error: "Firebase not initialized" });
-        try {
-          const user = await admin.auth().getUserByEmail(rawEmail);
-          const rolesEnv = splitCsvLower(process.env.ALLOWED_ROLES || process.env.REQUIRED_ROLE || "");
-          const userRole = ((user.customClaims && user.customClaims.role) || "").toLowerCase();
-          if (rolesEnv.length && !rolesEnv.includes(userRole)) {
-            if (db) {
-              await db.collection("security_logs").add({
-                type: "forbidden_role",
-                email: rawEmail,
-                role: userRole || null,
-                allowedRoles: rolesEnv,
-                ts: admin.firestore.FieldValue.serverTimestamp(),
-              });
-            }
-            return res.status(403).json({ error: "Role not authorized" });
-          }
-        } catch (err) {
+      if (!admin.apps.length) return res.status(500).json({ error: "Firebase not initialized" });
+      try {
+        const user = await admin.auth().getUserByEmail(rawEmail);
+        const rolesEnv = splitCsvLower(process.env.ALLOWED_ROLES || process.env.REQUIRED_ROLE || "");
+        const userRole = ((user.customClaims && user.customClaims.role) || "").toLowerCase();
+        if (rolesEnv.length && !rolesEnv.includes(userRole)) {
           if (db) {
             await db.collection("security_logs").add({
-              type: "auth_not_found",
+              type: "forbidden_role",
               email: rawEmail,
+              role: userRole || null,
+              allowedRoles: rolesEnv,
               ts: admin.firestore.FieldValue.serverTimestamp(),
-              err: String(err),
             });
           }
-          return res.status(403).json({ error: "Email not authorized" });
+          return res.status(403).json({ error: "Role not authorized" });
+        }
+      } catch (err) {
+        if (db) {
+          await db.collection("security_logs").add({
+            type: "auth_not_found",
+            email: rawEmail,
+            ts: admin.firestore.FieldValue.serverTimestamp(),
+            err: String(err),
+          });
+        }
+        return res.status(403).json({ error: "Email not authorized" });
         }
       }
     }
@@ -369,7 +369,8 @@ app.post("/api/ask", async (req, res) => {
     // בניית ה-prompt עם context מה-RAG
     const systemPrompt = buildGalibotSystemPrompt(ragContext);
     console.log(`[Ask] System prompt length: ${systemPrompt.length} characters`);
-    console.log(`[Ask] System prompt preview: ${systemPrompt.substring(0, 200)}...`);
+    console.log(`[Ask] System prompt preview (first 500 chars): ${systemPrompt.substring(0, 500)}...`);
+    console.log(`[Ask] System prompt ends with: ...${systemPrompt.substring(systemPrompt.length - 200)}`);
     const userMessage = prompt;
 
     // טעינת היסטוריית השיחה של המשתמש (אם מופעל)
@@ -393,7 +394,16 @@ app.post("/api/ask", async (req, res) => {
     
     console.log(`[Ask] Sending ${messages.length} messages to OpenAI (1 system + ${conversationHistory.length} history + 1 user)`);
     console.log(`[Ask] System message role: ${messages[0].role}, length: ${messages[0].content.length}`);
+    console.log(`[Ask] System message starts with: ${messages[0].content.substring(0, 100)}...`);
+    console.log(`[Ask] System message contains 'MANDATORY': ${messages[0].content.includes('MANDATORY')}`);
+    console.log(`[Ask] System message contains 'Socratic': ${messages[0].content.includes('Socratic')}`);
 
+    // וידוא שהפרומפט נשלח כ-system message
+    if (messages[0].role !== "system") {
+      console.error("[Ask] ERROR: First message is not system! Fixing...");
+      messages.unshift({ role: "system", content: systemPrompt });
+    }
+    
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: messages,
@@ -578,7 +588,8 @@ async function handleStreamingRequest(req, res) {
     // בניית ה-prompt
     const systemPrompt = buildGalibotSystemPrompt(ragContext);
     console.log(`[Stream] System prompt length: ${systemPrompt.length} characters`);
-    console.log(`[Stream] System prompt preview: ${systemPrompt.substring(0, 200)}...`);
+    console.log(`[Stream] System prompt preview (first 500 chars): ${systemPrompt.substring(0, 500)}...`);
+    console.log(`[Stream] System prompt ends with: ...${systemPrompt.substring(systemPrompt.length - 200)}`);
     const userMessage = prompt;
 
     // טעינת היסטוריית השיחה של המשתמש (אם מופעל)
@@ -602,6 +613,9 @@ async function handleStreamingRequest(req, res) {
     
     console.log(`[Stream] Sending ${messages.length} messages to OpenAI (1 system + ${conversationHistory.length} history + 1 user)`);
     console.log(`[Stream] System message role: ${messages[0].role}, length: ${messages[0].content.length}`);
+    console.log(`[Stream] System message starts with: ${messages[0].content.substring(0, 100)}...`);
+    console.log(`[Stream] System message contains 'MANDATORY': ${messages[0].content.includes('MANDATORY')}`);
+    console.log(`[Stream] System message contains 'Socratic': ${messages[0].content.includes('Socratic')}`);
 
     // שמירת הודעת המשתמש ב-memory (לפני יצירת התשובה)
     if (chatMemoryEnabled) {
@@ -614,6 +628,12 @@ async function handleStreamingRequest(req, res) {
       }
     }
 
+    // וידוא שהפרומפט נשלח כ-system message
+    if (messages[0].role !== "system") {
+      console.error("[Stream] ERROR: First message is not system! Fixing...");
+      messages.unshift({ role: "system", content: systemPrompt });
+    }
+    
     // יצירת streaming completion - OpenAI מחזיר stream של tokens
     const stream = await openai.chat.completions.create({
       model: OPENAI_MODEL,
