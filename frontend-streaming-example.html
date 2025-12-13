@@ -165,12 +165,13 @@
                                     sources = data.sources;
                                     console.log('Sources received:', sources);
                                 } else if (data.type === 'done') {
-                                    // הוספת sources אם קיימים
+                                    // הוספת sources אם קיימים - פורמט מינימלי
                                     if (sources && sources.length > 0) {
-                                        const sourcesText = '\n\nמקורות:\n' + sources.map((s, i) => 
-                                            `${i + 1}. ${s.source} (דמיון: ${(s.score * 100).toFixed(1)}%)`
-                                        ).join('\n');
-                                        updateBotMessage(fullAnswer + sourcesText);
+                                        const sourcesText = sources.map((s, i) => {
+                                            const fileName = s.source ? s.source.split('/').pop().split('\\').pop() : `מקור ${i + 1}`;
+                                            return `(${fileName})`;
+                                        }).join(' ');
+                                        updateBotMessage(fullAnswer + ' ' + sourcesText);
                                     }
                                     status.classList.remove('streaming');
                                     sendButton.disabled = false;
