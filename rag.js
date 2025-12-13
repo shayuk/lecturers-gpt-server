@@ -149,21 +149,30 @@ export async function queryRAG(queryText, topK = 3) {
     // עיבוד התוצאות - הורדנו את ה-filter ל-0.1 במקום 0.3
     const chunks = [];
     const sources = [];
+    const seenSources = new Set(); // למניעת כפילויות של מקורות
 
     for (const result of topResults) {
       // הורדנו את ה-filter ל-0.05 כדי לקבל יותר תוצאות
       if (result.text && result.similarity > 0.05) {
         chunks.push(result.text);
-        sources.push({
-          source: result.source,
-          score: result.similarity,
-          course_name: result.course_name,
-          metadata: result.metadata,
-        });
+        
+        // הוספת source רק אם לא ראינו אותו קודם (לפי שם קובץ)
+        const sourceName = result.source || "unknown";
+        const normalizedSource = sourceName.split('/').pop().split('\\').pop();
+        
+        if (!seenSources.has(normalizedSource)) {
+          seenSources.add(normalizedSource);
+          sources.push({
+            source: result.source,
+            score: result.similarity,
+            course_name: result.course_name,
+            metadata: result.metadata,
+          });
+        }
       }
     }
 
-    console.log(`[RAG] Returning ${chunks.length} chunks after filtering (similarity > 0.05)`);
+    console.log(`[RAG] Returning ${chunks.length} chunks after filtering (similarity > 0.05), ${sources.length} unique sources`);
     return { chunks, sources };
   } catch (e) {
     console.error("[RAG Query Error]", e);
