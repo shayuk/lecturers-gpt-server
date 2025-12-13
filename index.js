@@ -8,6 +8,14 @@ import pdfParse from "pdf-parse";
 import { initRAG, getRAGContext, uploadDocumentToRAG } from "./rag.js";
 import { initChatMemory, saveChatMessage, getUserConversationHistory } from "./chatMemory.js";
 import { buildGalibotSystemPrompt } from "./galibotSystemPrompt.js";
+import {
+  loadUserState,
+  saveUserState,
+  decideTurn,
+  applyDiagnosisEnforcement,
+  isValidDiagnosisOnlyOutput,
+  forcedDiagnosticTemplate
+} from "./topicState.js";
 
 /**
  * Cleans and normalizes LaTeX formulas in the bot's response
@@ -240,16 +248,28 @@ app.post("/api/ask", async (req, res) => {
 
     const { first_login } = await checkAndMarkFirstLogin(rawEmail);
 
+    // -----------------------------
+    // Galibot Enforcement: Topic State Machine (NEW)
+    // -----------------------------
+    const userState = await loadUserState(db, rawEmail);
+    const turn = decideTurn(prompt, userState);
+
     let ragContext = null;
-    if (ragEnabled) {
+    // בשלב אבחון (נושא חדש) – לא מושכים RAG כדי לא לעודד "הסברים".
+    if (ragEnabled && !turn.diagnosisOnly) {
       try {
-        const ragPromise = getRAGContext(prompt, 5);
+        const ragPromise = getRAGContext(turn.ragQuery || prompt, 5);
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 20000));
         ragContext = await Promise.race([ragPromise, timeoutPromise]);
-      } catch (e) { ragContext = null; }
+      } catch (e) {
+        ragContext = null;
+      }
     }
 
-    const systemPrompt = buildGalibotSystemPrompt(ragContext);
+    let systemPrompt = buildGalibotSystemPrompt(ragContext);
+    if (turn.diagnosisOnly) {
+      systemPrompt = applyDiagnosisEnforcement(systemPrompt);
+    }
     
     let conversationHistory = [];
     if (chatMemoryEnabled) {
@@ -265,11 +285,18 @@ app.post("/api/ask", async (req, res) => {
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: messages,
-      temperature: 0.2
+      temperature: turn.diagnosisOnly ? 0.15 : 0.2,
+      // מגביל כדי לצמצם "דאמפ" מידע; במצב full-solution מאפשרים יותר
+      max_tokens: turn.wantsFastPass ? 1200 : (turn.diagnosisOnly ? 140 : 420)
     });
 
     let answer = completion?.choices?.[0]?.message?.content?.trim() || "";
     answer = cleanLaTeXFormulas(answer);
+
+    // אם זה נושא חדש, מאמתים שהתשובה היא רק אבחון; אם לא — מחליפים בטמפלייט קשיח
+    if (turn.diagnosisOnly && !isValidDiagnosisOnlyOutput(answer)) {
+      answer = forcedDiagnosticTemplate(turn.activeTopic);
+    }
 
     if (chatMemoryEnabled) {
       try {
@@ -285,6 +312,9 @@ app.post("/api/ask", async (req, res) => {
         ts: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
+
+    // שמירת מצב הבוט (נושא/שלב) כדי שהמשתמש יוכל לענות גם בלי לציין את שם הנושא שוב
+    await saveUserState(db, turn.nextState);
 
     return res.json({ 
       answer, 
@@ -338,16 +368,28 @@ async function handleStreamingRequest(req, res) {
 
     const { first_login } = await checkAndMarkFirstLogin(rawEmail);
 
+    // -----------------------------
+    // Galibot Enforcement: Topic State Machine (NEW)
+    // -----------------------------
+    const userState = await loadUserState(db, rawEmail);
+    const turn = decideTurn(prompt, userState);
+
     let ragContext = null;
-    if (ragEnabled) {
+    // בשלב אבחון (נושא חדש) – לא מושכים RAG כדי לא לעודד "הסברים".
+    if (ragEnabled && !turn.diagnosisOnly) {
       try {
-        const ragPromise = getRAGContext(prompt, 5);
+        const ragPromise = getRAGContext(turn.ragQuery || prompt, 5);
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 20000));
         ragContext = await Promise.race([ragPromise, timeoutPromise]);
-      } catch (e) {}
+      } catch (e) {
+        ragContext = null;
+      }
     }
 
-    const systemPrompt = buildGalibotSystemPrompt(ragContext);
+    let systemPrompt = buildGalibotSystemPrompt(ragContext);
+    if (turn.diagnosisOnly) {
+      systemPrompt = applyDiagnosisEnforcement(systemPrompt);
+    }
     
     let conversationHistory = [];
     if (chatMemoryEnabled) {
@@ -364,10 +406,47 @@ async function handleStreamingRequest(req, res) {
       try { await saveChatMessage(rawEmail, "user", prompt); } catch (e) {}
     }
     
+    // אם זה נושא חדש: במקום להזרים מהמודל (שקשה לאכוף בזמן אמת), מבצעים completion קצר,
+    // מאמתים, ואז מזריםים ללקוח תשובה קצרה ומאובטחת.
+    if (turn.diagnosisOnly) {
+      const completion = await openai.chat.completions.create({
+        model: OPENAI_MODEL,
+        messages: messages,
+        temperature: 0.15,
+        max_tokens: 140
+      });
+
+      let fullAnswer = completion?.choices?.[0]?.message?.content?.trim() || "";
+      fullAnswer = cleanLaTeXFormulas(fullAnswer);
+
+      if (!isValidDiagnosisOnlyOutput(fullAnswer)) {
+        fullAnswer = forcedDiagnosticTemplate(turn.activeTopic);
+      }
+
+      // שולחים את כל ההודעה כ"טוקן" אחד (ה-UI עדיין עובד עם SSE)
+      res.write(`data: ${JSON.stringify({ type: "token", content: fullAnswer })}\n\n`);
+
+      if (ragContext?.sources) {
+        res.write(`data: ${JSON.stringify({ type: "sources", sources: ragContext.sources })}\n\n`);
+      }
+
+      if (chatMemoryEnabled && fullAnswer.trim()) {
+        try { await saveChatMessage(rawEmail, "assistant", fullAnswer); } catch (e) {}
+      }
+
+      await saveUserState(db, turn.nextState);
+
+      res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+      res.end();
+      return;
+    }
+
+    // מצב רגיל: streaming כרגיל
     const stream = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: messages,
-      temperature: 0.3, // מעט יותר יצירתיות לאישיות החדשה
+      temperature: turn.wantsFastPass ? 0.3 : 0.25,
+      max_tokens: turn.wantsFastPass ? 1200 : 420,
       stream: true
     });
 
@@ -382,7 +461,7 @@ async function handleStreamingRequest(req, res) {
         if (res.flush) res.flush();
       }
     }
-    
+
     fullAnswer = cleanLaTeXFormulas(fullAnswer);
 
     if (ragContext?.sources) {
@@ -392,6 +471,8 @@ async function handleStreamingRequest(req, res) {
     if (chatMemoryEnabled && fullAnswer.trim()) {
       try { await saveChatMessage(rawEmail, "assistant", fullAnswer); } catch (e) {}
     }
+
+    await saveUserState(db, turn.nextState);
 
     res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
     res.end();
