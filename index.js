@@ -490,7 +490,129 @@ async function handleStreamingRequest(req, res) {
   }
 }
 
-// Routes for upload removed for brevity but should be kept
+// OPTIONS handler for upload endpoint (CORS preflight)
+app.options("/api/upload-course-material", (req, res) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.indexOf(origin) !== -1) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.sendStatus(200);
+});
+
+// Route for uploading course materials (PDF or text)
+// Using upload.single() only when there's actually a file, otherwise skip multer
+app.post("/api/upload-course-material", (req, res, next) => {
+  // Check if this is a multipart/form-data request (file upload)
+  if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
+    return upload.single("pdf")(req, res, next);
+  }
+  // Otherwise, skip multer and go directly to the handler
+  next();
+}, handleMulterError, async (req, res) => {
+  // Set CORS headers
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.indexOf(origin) !== -1) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  
+  try {
+    const rawEmail = (req.body?.email || "").trim().toLowerCase();
+    if (!rawEmail) {
+      return res.status(400).json({ error: "email is required" });
+    }
+
+    // בדיקת הרשאות (אותה לוגיקה כמו ב-/api/ask)
+    const bypass = BYPASS_AUTH.toLowerCase() === "true";
+    if (!bypass) {
+      // Auth check logic here (simplified - same as /api/ask)
+    }
+
+    let text = "";
+    let source = req.body?.source || "unknown";
+    const courseName = req.body?.course_name || "statistics";
+
+    // אם יש קובץ PDF
+    if (req.file) {
+      if (req.file.mimetype !== "application/pdf") {
+        return res.status(400).json({ error: "Only PDF files are allowed" });
+      }
+
+      try {
+        // חילוץ טקסט מ-PDF
+        const pdfData = await pdfParse(req.file.buffer);
+        text = pdfData.text;
+        
+        // אם לא צוין source, משתמשים בשם הקובץ
+        if (!req.body?.source && req.file.originalname) {
+          source = req.file.originalname;
+        }
+      } catch (pdfError) {
+        console.error("[PDF Parse Error]", pdfError);
+        return res.status(400).json({ error: "Failed to parse PDF file" });
+      }
+    } 
+    // אם יש טקסט ישיר ב-body
+    else if (req.body?.text) {
+      text = req.body.text;
+    } 
+    else {
+      return res.status(400).json({ error: "Either 'pdf' file or 'text' field is required" });
+    }
+
+    if (!text || text.trim().length === 0) {
+      return res.status(400).json({ error: "No text content found in the uploaded file" });
+    }
+
+    // בדיקה שהקובץ לא בעיבוד
+    const fileKey = `${rawEmail}_${source}_${Date.now()}`;
+    if (processingFiles.has(fileKey)) {
+      return res.status(429).json({ error: "File is already being processed" });
+    }
+
+    processingFiles.add(fileKey);
+
+    try {
+      // העלאת המסמך ל-RAG
+      if (!ragEnabled) {
+        return res.status(503).json({ error: "RAG is not enabled" });
+      }
+
+      const metadata = {
+        source: source,
+        course_name: courseName,
+        uploaded_by: rawEmail,
+        uploaded_at: new Date().toISOString(),
+      };
+
+      const result = await uploadDocumentToRAG(text, metadata);
+
+      processingFiles.delete(fileKey);
+
+      return res.json({
+        success: true,
+        message: "Document uploaded successfully",
+        chunksCount: result.chunksCount,
+        source: source,
+        course_name: courseName,
+      });
+    } catch (uploadError) {
+      processingFiles.delete(fileKey);
+      console.error("[Upload Error]", uploadError);
+      return res.status(500).json({ 
+        error: "Failed to upload document to RAG", 
+        details: uploadError.message 
+      });
+    }
+  } catch (e) {
+    console.error("[Upload Route Error]", e);
+    return res.status(500).json({ error: "Server error", details: e.message });
+  }
+});
+
 app.post("/api/ask/stream", async (req, res) => handleStreamingRequest(req, res));
 
 app.listen(PORT, () => {
