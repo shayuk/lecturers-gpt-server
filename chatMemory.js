@@ -84,13 +84,12 @@ export async function getUserConversationHistory(userId, limit = MAX_HISTORY_MES
   try {
     const normalizedUserId = userId.toLowerCase().trim();
     
-    // טעינת ההודעות של המשתמש עם orderBy ו-limit ישירות ב-Firestore (מהיר יותר)
-    // נטען רק את ה-limit האחרונות ישירות מהדאטאבייס
+    // טעינת ההודעות של המשתמש - ללא orderBy כדי להימנע מדרישת אינדקס ומגבלת quota
+    // נטען את כל ההודעות ונמיין ב-JavaScript (איטי יותר אבל לא דורש אינדקס)
     const snapshot = await firestoreDb
       .collection("chat_messages")
       .where("userId", "==", normalizedUserId)
-      .orderBy("createdAt", "desc") // הכי חדש ראשון
-      .limit(limit * 2) // לוקח קצת יותר כדי להיות בטוחים שיש מספיק
+      .limit(limit * 3) // לוקח קצת יותר כדי להיות בטוחים שיש מספיק
       .get();
 
     if (snapshot.empty) {
@@ -124,6 +123,13 @@ export async function getUserConversationHistory(userId, limit = MAX_HISTORY_MES
   } catch (error) {
     console.error("[ChatMemory] Error loading conversation history:", error);
     console.error("[ChatMemory] Error details:", error.message);
+    
+    // אם זו שגיאת quota, נחזיר מערך ריק כדי לא לחסום את התגובה
+    if (error.code === 8 || error.message?.includes("Quota exceeded") || error.message?.includes("RESOURCE_EXHAUSTED")) {
+      console.warn("[ChatMemory] Firestore quota exceeded - returning empty history to avoid blocking response");
+      return [];
+    }
+    
     return [];
   }
 }
@@ -138,21 +144,28 @@ async function cleanupOldMessages(userId) {
   try {
     const normalizedUserId = userId.toLowerCase().trim();
     
-    // טעינת ההודעות עם orderBy ישירות ב-Firestore (מהיר יותר)
-    // נטען רק את מה שצריך למחיקה
+    // טעינת כל ההודעות - ללא orderBy כדי להימנע מדרישת אינדקס ומגבלת quota
     const snapshot = await firestoreDb
       .collection("chat_messages")
       .where("userId", "==", normalizedUserId)
-      .orderBy("createdAt", "desc")
-      .offset(MAX_STORED_MESSAGES_PER_USER) // דילוג על ה-MAX_STORED_MESSAGES_PER_USER הראשונות (החדשות)
+      .limit(MAX_STORED_MESSAGES_PER_USER * 2) // לוקח רק כפול מהמקסימום כדי לא להעמיס
       .get();
 
-    if (snapshot.empty) {
+    if (snapshot.size <= MAX_STORED_MESSAGES_PER_USER) {
       return; // אין צורך בניקוי
     }
 
-    // כל ה-docs ב-snapshot הם כבר הישנים שצריך למחוק (כי השתמשנו ב-offset)
-    const messagesToDelete = snapshot.docs;
+    // מיון ב-JavaScript לפי זמן (הכי חדש ראשון)
+    const sortedDocs = snapshot.docs
+      .map(doc => ({
+        doc,
+        createdAt: doc.data().createdAt ? doc.data().createdAt.toMillis() : 0
+      }))
+      .filter(item => item.createdAt > 0) // רק docs עם תאריך תקין
+      .sort((a, b) => b.createdAt - a.createdAt); // מיון יורד (חדש → ישן)
+
+    // מחיקת ההודעות הישנות ביותר (מעבר ל-MAX_STORED_MESSAGES_PER_USER)
+    const messagesToDelete = sortedDocs.slice(MAX_STORED_MESSAGES_PER_USER).map(item => item.doc);
     
     if (messagesToDelete.length === 0) {
       return;
@@ -175,6 +188,13 @@ async function cleanupOldMessages(userId) {
   } catch (error) {
     console.error("[ChatMemory] Error cleaning up old messages:", error);
     console.error("[ChatMemory] Cleanup error details:", error.message);
+    
+    // אם זו שגיאת quota, פשוט נדלג על הניקוי
+    if (error.code === 8 || error.message?.includes("Quota exceeded") || error.message?.includes("RESOURCE_EXHAUSTED")) {
+      console.warn("[ChatMemory] Firestore quota exceeded - skipping cleanup");
+      return;
+    }
+    
     // לא נזרוק שגיאה - זה לא קריטי
   }
 }

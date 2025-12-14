@@ -100,6 +100,10 @@ export async function loadUserState(db, email) {
     };
   } catch (e) {
     console.warn("[GalibotState] loadUserState failed:", e?.message || e);
+    // אם זו שגיאת quota, נחזיר מצב ברירת מחדל כדי לא לחסום את התגובה
+    if (e.code === 8 || e.message?.includes("Quota exceeded") || e.message?.includes("RESOURCE_EXHAUSTED")) {
+      console.warn("[GalibotState] Firestore quota exceeded - using default state");
+    }
     return defaultUserState(email);
   }
 }
@@ -122,6 +126,10 @@ export async function saveUserState(db, state) {
     return true;
   } catch (e) {
     console.warn("[GalibotState] saveUserState failed:", e?.message || e);
+    // אם זו שגיאת quota, נדלג על השמירה (לא קריטי)
+    if (e.code === 8 || e.message?.includes("Quota exceeded") || e.message?.includes("RESOURCE_EXHAUSTED")) {
+      console.warn("[GalibotState] Firestore quota exceeded - skipping state save");
+    }
     return false;
   }
 }
