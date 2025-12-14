@@ -193,9 +193,24 @@ export function applyDiagnosisEnforcement(systemPrompt) {
   );
 }
 
+// פונקציה לזיהוי אם המשתמש עונה על שאלה רב-בררתית
+function isAnswerToMultipleChoice(prompt) {
+  const text = (prompt || "").trim();
+  // מזהה תשובות כמו "A)", "B)", "C)", "D)", "A", "B", "C", "D"
+  // או תשובות שמתחילות עם אות ואז סוגריים או נקודה
+  const answerPattern = /^[A-D][\)\.]\s*/i;
+  // או תשובה שמכילה רק אות אחת (A, B, C, D)
+  const singleLetterPattern = /^[A-D]$/i;
+  // או תשובה שמתחילה עם אות ואז טקסט (כמו "A) התפלגות...")
+  const answerWithTextPattern = /^[A-D][\)\.]\s+.+/i;
+  
+  return answerPattern.test(text) || singleLetterPattern.test(text) || answerWithTextPattern.test(text);
+}
+
 export function decideTurn(prompt, state) {
   const explicitTopic = detectTopic(prompt);
   const wantsFastPass = isFastPassRequest(prompt);
+  const isAnswer = isAnswerToMultipleChoice(prompt);
 
   const currentTopic = state?.currentTopic || null;
   const diagnosedTopics = state?.diagnosedTopics || {};
@@ -210,7 +225,11 @@ export function decideTurn(prompt, state) {
   let diagnosisOnly = false;
 
   if (!wantsFastPass) {
-    if (activeTopic === "unknown" && !hasActiveTopic) {
+    // אם המשתמש עונה על שאלה (A, B, C, D), זה לא אבחון - זה תשובה לשאלה קיימת
+    if (isAnswer && phase === "DIAGNOSE") {
+      // המשתמש עונה על שאלת אבחון - עוברים למצב TEACH
+      diagnosisOnly = false;
+    } else if (activeTopic === "unknown" && !hasActiveTopic) {
       // אין לנו מושג מה הנושא — קודם מאבחנים
       diagnosisOnly = true;
     } else if (topicChanged) {
