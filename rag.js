@@ -72,8 +72,8 @@ export async function queryRAG(queryText, topK = 3) {
     const queryEmbedding = await createEmbedding(queryText);
     console.log(`[RAG] Created query embedding, dimension: ${queryEmbedding.length}`);
 
-    // קבלת כל ה-chunks מ-Firestore עם הגבלה (מקסימום 500 כדי לשפר ביצועים)
-    const chunksSnapshot = await firestoreDb.collection("rag_chunks").limit(500).get();
+    // קבלת כל ה-chunks מ-Firestore עם הגבלה קטנה יותר (200 במקום 500) כדי לשפר ביצועים
+    const chunksSnapshot = await firestoreDb.collection("rag_chunks").limit(200).get();
     console.log(`[RAG] Found ${chunksSnapshot.size} chunks in database`);
     
     if (chunksSnapshot.empty) {
@@ -81,61 +81,64 @@ export async function queryRAG(queryText, topK = 3) {
       return { chunks: [], sources: [] };
     }
 
-    // חישוב similarity לכל chunk (עם הגבלת זמן)
+    // חישוב similarity לכל chunk (עם הגבלת זמן קצרה יותר)
     const similarities = [];
     const startTime = Date.now();
-    const MAX_PROCESSING_TIME = 20000; // 20 שניות מקסימום
+    const MAX_PROCESSING_TIME = 5000; // 5 שניות מקסימום (הוקטן מ-20)
     let processedCount = 0;
     let skippedCount = 0;
     
     // המרה ל-array כדי לשפר ביצועים
     const chunksArray = chunksSnapshot.docs;
     
-    for (let i = 0; i < chunksArray.length; i++) {
-      // בדיקת timeout - רק אם עבר הרבה זמן
+    // חישוב similarity במקביל בקבוצות קטנות כדי לשפר ביצועים
+    const BATCH_SIZE = 50; // מעבד 50 chunks בכל פעם
+    for (let batchStart = 0; batchStart < chunksArray.length; batchStart += BATCH_SIZE) {
+      // בדיקת timeout
       if (Date.now() - startTime > MAX_PROCESSING_TIME) {
         console.warn(`[RAG] Query timeout after ${processedCount} chunks - stopping similarity calculation`);
         break;
       }
 
-      const doc = chunksArray[i];
-      const data = doc.data();
-      const chunkEmbedding = data.embedding;
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, chunksArray.length);
+      const batch = chunksArray.slice(batchStart, batchEnd);
       
-      if (!chunkEmbedding) {
-        skippedCount++;
-        continue;
-      }
+      // עיבוד ה-batch במקביל
+      const batchPromises = batch.map(async (doc) => {
+        const data = doc.data();
+        const chunkEmbedding = data.embedding;
+        
+        if (!chunkEmbedding || !Array.isArray(chunkEmbedding)) {
+          skippedCount++;
+          return null;
+        }
+        
+        // בדיקת dimension
+        if (chunkEmbedding.length !== queryEmbedding.length) {
+          skippedCount++;
+          return null;
+        }
+        
+        try {
+          const similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
+          return {
+            id: doc.id,
+            text: data.text || "",
+            source: data.source || "unknown",
+            course_name: data.course_name || "",
+            similarity: similarity,
+            metadata: data.metadata || {},
+          };
+        } catch (simError) {
+          skippedCount++;
+          return null;
+        }
+      });
       
-      if (!Array.isArray(chunkEmbedding)) {
-        console.warn(`[RAG] Chunk ${doc.id} has invalid embedding type: ${typeof chunkEmbedding}`);
-        skippedCount++;
-        continue;
-      }
-      
-      // בדיקת dimension
-      if (chunkEmbedding.length !== queryEmbedding.length) {
-        console.warn(`[RAG] Chunk ${doc.id} dimension mismatch: ${chunkEmbedding.length} vs ${queryEmbedding.length}`);
-        skippedCount++;
-        continue;
-      }
-      
-      try {
-        const similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
-        similarities.push({
-          id: doc.id,
-          text: data.text || "",
-          source: data.source || "unknown",
-          course_name: data.course_name || "",
-          similarity: similarity,
-          metadata: data.metadata || {},
-        });
-        processedCount++;
-      } catch (simError) {
-        // דילוג על chunks עם שגיאות
-        console.warn(`[RAG] Error calculating similarity for chunk ${doc.id}:`, simError);
-        skippedCount++;
-      }
+      const batchResults = await Promise.all(batchPromises);
+      const validResults = batchResults.filter(r => r !== null);
+      similarities.push(...validResults);
+      processedCount += validResults.length;
     }
 
     console.log(`[RAG] Processed ${processedCount} chunks, skipped ${skippedCount}`);

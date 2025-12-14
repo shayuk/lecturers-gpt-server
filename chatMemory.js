@@ -51,8 +51,11 @@ export async function saveChatMessage(userId, role, content, metadata = {}) {
     const docRef = await firestoreDb.collection("chat_messages").add(messageData);
     console.log(`[ChatMemory] Saved ${role} message for user ${userId.substring(0, 10)}... (ID: ${docRef.id})`);
 
-    // ניקוי הודעות ישנות - שמירה רק על ה-MAX_STORED_MESSAGES_PER_USER האחרונות
-    await cleanupOldMessages(userId);
+    // ניקוי הודעות ישנות - רץ ברקע (לא חוסם את התגובה)
+    // רץ רק כל 10 הודעות כדי לא להאט את התגובה
+    cleanupOldMessages(userId).catch(err => {
+      console.error("[ChatMemory] Background cleanup failed:", err);
+    });
 
     return docRef.id;
   } catch (error) {
@@ -81,11 +84,13 @@ export async function getUserConversationHistory(userId, limit = MAX_HISTORY_MES
   try {
     const normalizedUserId = userId.toLowerCase().trim();
     
-    // טעינת ההודעות של המשתמש - ללא orderBy כדי להימנע מדרישת אינדקס
-    // נטען את כל ההודעות ונמיין ב-JavaScript
+    // טעינת ההודעות של המשתמש עם orderBy ו-limit ישירות ב-Firestore (מהיר יותר)
+    // נטען רק את ה-limit האחרונות ישירות מהדאטאבייס
     const snapshot = await firestoreDb
       .collection("chat_messages")
       .where("userId", "==", normalizedUserId)
+      .orderBy("createdAt", "desc") // הכי חדש ראשון
+      .limit(limit * 2) // לוקח קצת יותר כדי להיות בטוחים שיש מספיק
       .get();
 
     if (snapshot.empty) {
@@ -93,7 +98,7 @@ export async function getUserConversationHistory(userId, limit = MAX_HISTORY_MES
       return [];
     }
 
-    // המרה ל-array וממיון לפי זמן (הכי ישן ראשון)
+    // המרה ל-array וממיון לפי זמן (הכי ישן ראשון) - רק את ה-limit האחרונות
     let messages = snapshot.docs
       .map(doc => {
         const data = doc.data();
@@ -104,15 +109,11 @@ export async function getUserConversationHistory(userId, limit = MAX_HISTORY_MES
         };
       })
       .sort((a, b) => a.createdAt - b.createdAt) // מיון לפי זמן (ישן → חדש)
+      .slice(-limit) // לוקח רק את ה-limit האחרונות
       .map(msg => ({
         role: msg.role,
         content: msg.content
       })); // הסרת createdAt מהתוצאה הסופית
-
-    // לוקח רק את ה-limit האחרונות (אם יש יותר מ-limit)
-    if (messages.length > limit) {
-      messages = messages.slice(-limit);
-    }
 
     console.log(`[ChatMemory] Loaded ${messages.length} messages for user ${normalizedUserId.substring(0, 10)}...`);
     if (messages.length > 0) {
@@ -137,26 +138,21 @@ async function cleanupOldMessages(userId) {
   try {
     const normalizedUserId = userId.toLowerCase().trim();
     
-    // טעינת כל ההודעות של המשתמש - ללא orderBy כדי להימנע מדרישת אינדקס
+    // טעינת ההודעות עם orderBy ישירות ב-Firestore (מהיר יותר)
+    // נטען רק את מה שצריך למחיקה
     const snapshot = await firestoreDb
       .collection("chat_messages")
       .where("userId", "==", normalizedUserId)
+      .orderBy("createdAt", "desc")
+      .offset(MAX_STORED_MESSAGES_PER_USER) // דילוג על ה-MAX_STORED_MESSAGES_PER_USER הראשונות (החדשות)
       .get();
 
-    if (snapshot.size <= MAX_STORED_MESSAGES_PER_USER) {
+    if (snapshot.empty) {
       return; // אין צורך בניקוי
     }
 
-    // מיון ב-JavaScript לפי זמן (הכי חדש ראשון)
-    const sortedDocs = snapshot.docs
-      .map(doc => ({
-        doc,
-        createdAt: doc.data().createdAt ? doc.data().createdAt.toMillis() : 0
-      }))
-      .sort((a, b) => b.createdAt - a.createdAt); // מיון יורד (חדש → ישן)
-
-    // מחיקת ההודעות הישנות ביותר (מעבר ל-MAX_STORED_MESSAGES_PER_USER)
-    const messagesToDelete = sortedDocs.slice(MAX_STORED_MESSAGES_PER_USER);
+    // כל ה-docs ב-snapshot הם כבר הישנים שצריך למחוק (כי השתמשנו ב-offset)
+    const messagesToDelete = snapshot.docs;
     
     if (messagesToDelete.length === 0) {
       return;
@@ -168,7 +164,7 @@ async function cleanupOldMessages(userId) {
       const batch = firestoreDb.batch();
       const batchDocs = messagesToDelete.slice(i, i + batchSize);
       
-      batchDocs.forEach(({ doc }) => {
+      batchDocs.forEach((doc) => {
         batch.delete(doc.ref);
       });
       

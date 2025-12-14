@@ -304,23 +304,19 @@ app.post("/api/ask", async (req, res) => {
       answer = forcedDiagnosticTemplate(turn.activeTopic);
     }
 
-    if (chatMemoryEnabled) {
-      try {
-        await saveChatMessage(rawEmail, "user", prompt);
-        await saveChatMessage(rawEmail, "assistant", answer);
-      } catch (e) {}
-    }
-
-    if (db) {
-      await db.collection("usage_logs").add({
+    // שמירת הודעות ומצב במקביל (לא חוסם את התגובה)
+    Promise.all([
+      chatMemoryEnabled ? Promise.all([
+        saveChatMessage(rawEmail, "user", prompt).catch(() => {}),
+        saveChatMessage(rawEmail, "assistant", answer).catch(() => {})
+      ]) : Promise.resolve(),
+      db ? db.collection("usage_logs").add({
         email: rawEmail,
         model: completion?.model || OPENAI_MODEL,
         ts: admin.firestore.FieldValue.serverTimestamp(),
-      });
-    }
-
-    // שמירת מצב הבוט (נושא/שלב) כדי שהמשתמש יוכל לענות גם בלי לציין את שם הנושא שוב
-    await saveUserState(db, turn.nextState);
+      }).catch(() => {}) : Promise.resolve(),
+      saveUserState(db, turn.nextState)
+    ]).catch(() => {}); // לא נזרוק שגיאה - זה לא קריטי
 
     return res.json({ 
       answer, 
@@ -377,7 +373,12 @@ async function handleStreamingRequest(req, res) {
     // -----------------------------
     // Galibot Enforcement: Topic State Machine (NEW)
     // -----------------------------
-    const userState = await loadUserState(db, rawEmail);
+    // טעינת userState ו-conversationHistory במקביל כדי לשפר ביצועים
+    const [userState, conversationHistory] = await Promise.all([
+      loadUserState(db, rawEmail),
+      chatMemoryEnabled ? getUserConversationHistory(rawEmail).catch(() => []) : Promise.resolve([])
+    ]);
+    
     const turn = decideTurn(prompt, userState);
 
     let ragContext = null;
@@ -385,7 +386,7 @@ async function handleStreamingRequest(req, res) {
     if (ragEnabled && !turn.diagnosisOnly) {
       try {
         const ragPromise = getRAGContext(turn.ragQuery || prompt, 5);
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 20000));
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 5000)); // הוקטן מ-20 ל-5 שניות
         ragContext = await Promise.race([ragPromise, timeoutPromise]);
       } catch (e) {
         ragContext = null;
@@ -396,11 +397,6 @@ async function handleStreamingRequest(req, res) {
     if (turn.diagnosisOnly) {
       systemPrompt = applyDiagnosisEnforcement(systemPrompt);
     }
-    
-    let conversationHistory = [];
-    if (chatMemoryEnabled) {
-      try { conversationHistory = await getUserConversationHistory(rawEmail); } catch (e) {}
-    }
 
     const messages = [
       { role: "system", content: systemPrompt },
@@ -408,8 +404,9 @@ async function handleStreamingRequest(req, res) {
       { role: "user", content: prompt }
     ];
 
+    // שמירת הודעת המשתמש ברקע (לא חוסם את התגובה)
     if (chatMemoryEnabled) {
-      try { await saveChatMessage(rawEmail, "user", prompt); } catch (e) {}
+      saveChatMessage(rawEmail, "user", prompt).catch(() => {});
     }
     
     // אם זה נושא חדש: במקום להזרים מהמודל (שקשה לאכוף בזמן אמת), מבצעים completion קצר,
@@ -436,11 +433,11 @@ async function handleStreamingRequest(req, res) {
         res.write(`data: ${JSON.stringify({ type: "sources", sources: ragContext.sources })}\n\n`);
       }
 
+      // שמירת הודעת הבוט ומצב ברקע (לא חוסם את התגובה)
       if (chatMemoryEnabled && fullAnswer.trim()) {
-        try { await saveChatMessage(rawEmail, "assistant", fullAnswer); } catch (e) {}
+        saveChatMessage(rawEmail, "assistant", fullAnswer).catch(() => {});
       }
-
-      await saveUserState(db, turn.nextState);
+      saveUserState(db, turn.nextState);
 
       res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
       res.end();
@@ -474,11 +471,11 @@ async function handleStreamingRequest(req, res) {
       res.write(`data: ${JSON.stringify({ type: "sources", sources: ragContext.sources })}\n\n`);
     }
 
+    // שמירת הודעת הבוט ומצב ברקע (לא חוסם את התגובה)
     if (chatMemoryEnabled && fullAnswer.trim()) {
-      try { await saveChatMessage(rawEmail, "assistant", fullAnswer); } catch (e) {}
+      saveChatMessage(rawEmail, "assistant", fullAnswer).catch(() => {});
     }
-
-    await saveUserState(db, turn.nextState);
+    saveUserState(db, turn.nextState);
 
     res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
     res.end();
