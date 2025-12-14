@@ -490,28 +490,17 @@ async function handleStreamingRequest(req, res) {
   }
 }
 
-// OPTIONS handler for upload endpoint (CORS preflight)
-app.options("/api/upload-course-material", (req, res) => {
-  const origin = req.headers.origin;
-  if (origin && allowedOrigins.indexOf(origin) !== -1) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  }
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret");
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.sendStatus(200);
-});
-
-// Route for uploading course materials (PDF or text)
-// Using upload.single() only when there's actually a file, otherwise skip multer
-app.post("/api/upload-course-material", (req, res, next) => {
+// Handler function for upload endpoint (reusable for both /api/upload-course-material and /upload-course-material)
+const uploadHandler = (req, res, next) => {
   // Check if this is a multipart/form-data request (file upload)
   if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
     return upload.single("pdf")(req, res, next);
   }
   // Otherwise, skip multer and go directly to the handler
   next();
-}, handleMulterError, async (req, res) => {
+};
+
+const uploadRouteHandler = async (req, res) => {
   // Set CORS headers
   const origin = req.headers.origin;
   if (origin && allowedOrigins.indexOf(origin) !== -1) {
@@ -611,7 +600,34 @@ app.post("/api/upload-course-material", (req, res, next) => {
     console.error("[Upload Route Error]", e);
     return res.status(500).json({ error: "Server error", details: e.message });
   }
+};
+
+// OPTIONS handlers for upload endpoints (CORS preflight)
+app.options("/api/upload-course-material", (req, res) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.indexOf(origin) !== -1) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.sendStatus(200);
 });
+
+app.options("/upload-course-material", (req, res) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.indexOf(origin) !== -1) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.sendStatus(200);
+});
+
+// Routes for uploading course materials (PDF or text) - support both /api/upload-course-material and /upload-course-material
+app.post("/api/upload-course-material", uploadHandler, handleMulterError, uploadRouteHandler);
+app.post("/upload-course-material", uploadHandler, handleMulterError, uploadRouteHandler);
 
 app.post("/api/ask/stream", async (req, res) => handleStreamingRequest(req, res));
 
