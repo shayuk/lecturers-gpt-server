@@ -457,7 +457,11 @@ async function handleStreamingRequest(req, res) {
 
       // שמירת הודעת הבוט ומצב ברקע (לא חוסם את התגובה)
       if (chatMemoryEnabled && fullAnswer.trim()) {
-        saveChatMessage(rawEmail, "assistant", fullAnswer).catch(() => {});
+        saveChatMessage(rawEmail, "assistant", fullAnswer).catch((e) => {
+          if (e.code === 8 || e.message?.includes("Quota exceeded")) {
+            console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
+          }
+        });
       }
       saveUserState(db, turn.nextState);
 
