@@ -258,6 +258,12 @@ export function decideTurn(prompt, state) {
   if (diagnosisOnly && activeTopic !== "unknown") {
     nextState.diagnosedTopics[activeTopic] = true;
   }
+  
+  // אם המשתמש עונה על שאלה (A/B/C/D) במצב DIAGNOSE, עוברים למצב TEACH
+  if (isAnswer && phase === "DIAGNOSE" && activeTopic !== "unknown") {
+    nextState.phase = "TEACH";
+    nextState.diagnosedTopics[activeTopic] = true; // מסמנים שכבר בוצע אבחון
+  }
 
   // רמז ל-RAG: אם המשתמש עונה על אבחון בלי לציין את שם הנושא, נוסיף אותו לשאילתת החיפוש
   const ragQuery = (activeTopic !== "unknown" && explicitTopic === "unknown")

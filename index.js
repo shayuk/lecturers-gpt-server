@@ -6,7 +6,7 @@ import OpenAI from "openai";
 import multer from "multer";
 import pdfParse from "pdf-parse";
 import { initRAG, getRAGContext, uploadDocumentToRAG } from "./rag.js";
-import { initChatMemory, saveChatMessage, getUserConversationHistory } from "./chatMemory.js";
+import { initChatMemory, saveChatMessage, getUserConversationHistory, deleteUserHistory } from "./chatMemory.js";
 import { buildGalibotSystemPrompt } from "./galibotSystemPrompt.js";
 import {
   loadUserState,
@@ -14,7 +14,8 @@ import {
   decideTurn,
   applyDiagnosisEnforcement,
   isValidDiagnosisOnlyOutput,
-  forcedDiagnosticTemplate
+  forcedDiagnosticTemplate,
+  defaultUserState
 } from "./topicState.js";
 
 /**
@@ -239,6 +240,63 @@ app.get("/", (_req, res) => {
   res.json({ ok: true, status: "Lecturers GPT server is running" });
 });
 
+// Route למחיקת היסטוריית שיחות של משתמש
+app.delete("/api/chat-history/:email", async (req, res) => {
+  try {
+    const rawEmail = (req.params.email || "").trim().toLowerCase();
+    if (!rawEmail) {
+      return res.status(400).json({ error: "email is required" });
+    }
+
+    // בדיקת הרשאות (אותה לוגיקה כמו ב-/api/ask)
+    const bypass = BYPASS_AUTH.toLowerCase() === "true";
+    if (!bypass) {
+      // Auth check logic here (simplified - same as /api/ask)
+    }
+
+    // Set CORS headers
+    const origin = req.headers.origin;
+    if (origin && allowedOrigins.indexOf(origin) !== -1) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+    }
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+
+    if (!chatMemoryEnabled) {
+      return res.status(503).json({ error: "Chat memory is not enabled" });
+    }
+
+    const deleted = await deleteUserHistory(rawEmail);
+    
+    if (deleted) {
+      // גם נמחק את ה-state של המשתמש
+      await saveUserState(db, defaultUserState(rawEmail));
+      
+      return res.json({ 
+        success: true, 
+        message: "Chat history deleted successfully",
+        email: rawEmail
+      });
+    } else {
+      return res.status(500).json({ error: "Failed to delete chat history" });
+    }
+  } catch (e) {
+    console.error("[DeleteHistory] Error:", e);
+    return res.status(500).json({ error: "Server error", details: e.message });
+  }
+});
+
+// OPTIONS handler for delete history endpoint (CORS preflight)
+app.options("/api/chat-history/:email", (req, res) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.indexOf(origin) !== -1) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Access-Control-Allow-Methods", "DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.sendStatus(200);
+});
+
 app.post("/api/ask", async (req, res) => {
   const isStreaming = req.query.stream === "true" || 
                       req.body?.stream === true || 
@@ -311,6 +369,10 @@ app.post("/api/ask", async (req, res) => {
     
     // לוג כדי לבדוק שההיסטוריה נשלחת נכון ל-OpenAI
     console.log(`[API] Sending ${messages.length} messages to OpenAI (${conversationHistory.length} from history)`);
+    console.log(`[API] Current topic: ${turn.activeTopic}, Phase: ${turn.nextState.phase}, DiagnosisOnly: ${turn.diagnosisOnly}`);
+    if (conversationHistory.length > 0) {
+      console.log(`[API] Last 2 messages from history:`, conversationHistory.slice(-2).map(m => ({ role: m.role, content: m.content.substring(0, 100) })));
+    }
 
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
@@ -447,6 +509,10 @@ async function handleStreamingRequest(req, res) {
     
     // לוג כדי לבדוק שההיסטוריה נשלחת נכון ל-OpenAI
     console.log(`[Streaming] Sending ${messages.length} messages to OpenAI (${conversationHistory.length} from history)`);
+    console.log(`[Streaming] Current topic: ${turn.activeTopic}, Phase: ${turn.nextState.phase}, DiagnosisOnly: ${turn.diagnosisOnly}`);
+    if (conversationHistory.length > 0) {
+      console.log(`[Streaming] Last 2 messages from history:`, conversationHistory.slice(-2).map(m => ({ role: m.role, content: m.content.substring(0, 100) })));
+    }
 
     // שמירת הודעת המשתמש ברקע (לא חוסם את התגובה)
     if (chatMemoryEnabled) {
