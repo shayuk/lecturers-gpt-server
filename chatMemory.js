@@ -60,6 +60,10 @@ export async function saveChatMessage(userId, role, content, metadata = {}) {
     return docRef.id;
   } catch (error) {
     console.error("[ChatMemory] Error saving message:", error);
+    // אם זו שגיאת quota, נדלג על השמירה (לא קריטי)
+    if (error.code === 8 || error.message?.includes("Quota exceeded") || error.message?.includes("RESOURCE_EXHAUSTED")) {
+      console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
+    }
     return null;
   }
 }

@@ -179,6 +179,10 @@ export async function queryRAG(queryText, topK = 3) {
     return { chunks, sources };
   } catch (e) {
     console.error("[RAG Query Error]", e);
+    // אם זו שגיאת quota, נחזיר מערך ריק כדי לא לחסום את התגובה
+    if (e.code === 8 || e.message?.includes("Quota exceeded") || e.message?.includes("RESOURCE_EXHAUSTED")) {
+      console.warn("[RAG] Firestore quota exceeded - returning empty results to avoid blocking response");
+    }
     return { chunks: [], sources: [] };
   }
 }

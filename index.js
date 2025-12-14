@@ -213,14 +213,24 @@ function emailDomainOf(email) {
 async function checkAndMarkFirstLogin(rawEmail) {
   if (!db) return { first_login: false };
   const email = rawEmail.toLowerCase();
-  const ref = db.collection("user_profiles").doc(email);
-  const snap = await ref.get();
-  const now = admin.firestore.FieldValue.serverTimestamp();
-  if (!snap.exists) {
-    await ref.set({ email, created_at: now, last_login_at: now, first_login_seen: false });
-    return { first_login: true };
-  } else {
-    await ref.update({ last_login_at: now });
+  try {
+    const ref = db.collection("user_profiles").doc(email);
+    const snap = await ref.get();
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    if (!snap.exists) {
+      await ref.set({ email, created_at: now, last_login_at: now, first_login_seen: false });
+      return { first_login: true };
+    } else {
+      await ref.update({ last_login_at: now });
+      return { first_login: false };
+    }
+  } catch (e) {
+    // אם יש שגיאת quota או כל שגיאה אחרת, נחזיר first_login: false כדי לא לחסום את התגובה
+    if (e.code === 8 || e.message?.includes("Quota exceeded") || e.message?.includes("RESOURCE_EXHAUSTED")) {
+      console.warn("[FirstLogin] Firestore quota exceeded - skipping first login check");
+    } else {
+      console.warn("[FirstLogin] Error checking first login:", e?.message || e);
+    }
     return { first_login: false };
   }
 }
@@ -307,14 +317,26 @@ app.post("/api/ask", async (req, res) => {
     // שמירת הודעות ומצב במקביל (לא חוסם את התגובה)
     Promise.all([
       chatMemoryEnabled ? Promise.all([
-        saveChatMessage(rawEmail, "user", prompt).catch(() => {}),
-        saveChatMessage(rawEmail, "assistant", answer).catch(() => {})
+        saveChatMessage(rawEmail, "user", prompt).catch((e) => {
+          if (e.code === 8 || e.message?.includes("Quota exceeded")) {
+            console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
+          }
+        }),
+        saveChatMessage(rawEmail, "assistant", answer).catch((e) => {
+          if (e.code === 8 || e.message?.includes("Quota exceeded")) {
+            console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
+          }
+        })
       ]) : Promise.resolve(),
       db ? db.collection("usage_logs").add({
         email: rawEmail,
         model: completion?.model || OPENAI_MODEL,
         ts: admin.firestore.FieldValue.serverTimestamp(),
-      }).catch(() => {}) : Promise.resolve(),
+      }).catch((e) => {
+        if (e.code === 8 || e.message?.includes("Quota exceeded")) {
+          console.warn("[UsageLogs] Firestore quota exceeded - skipping log");
+        }
+      }) : Promise.resolve(),
       saveUserState(db, turn.nextState)
     ]).catch(() => {}); // לא נזרוק שגיאה - זה לא קריטי
 
