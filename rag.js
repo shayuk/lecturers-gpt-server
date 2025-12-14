@@ -72,8 +72,9 @@ export async function queryRAG(queryText, topK = 3) {
     const queryEmbedding = await createEmbedding(queryText);
     console.log(`[RAG] Created query embedding, dimension: ${queryEmbedding.length}`);
 
-    // קבלת כל ה-chunks מ-Firestore עם הגבלה קטנה יותר (200 במקום 500) כדי לשפר ביצועים
-    const chunksSnapshot = await firestoreDb.collection("rag_chunks").limit(200).get();
+    // קבלת כל ה-chunks מ-Firestore עם הגבלה קטנה יותר (100 במקום 200) כדי להפחית קריאות
+    // זה מפחית את מספר ה-reads מ-200 ל-100 לכל שאילתה
+    const chunksSnapshot = await firestoreDb.collection("rag_chunks").limit(100).get();
     console.log(`[RAG] Found ${chunksSnapshot.size} chunks in database`);
     
     if (chunksSnapshot.empty) {

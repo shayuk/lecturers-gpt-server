@@ -52,10 +52,18 @@ export async function saveChatMessage(userId, role, content, metadata = {}) {
     console.log(`[ChatMemory] Saved ${role} message for user ${userId.substring(0, 10)}... (ID: ${docRef.id})`);
 
     // ניקוי הודעות ישנות - רץ ברקע (לא חוסם את התגובה)
-    // רץ רק כל 10 הודעות כדי לא להאט את התגובה
-    cleanupOldMessages(userId).catch(err => {
-      console.error("[ChatMemory] Background cleanup failed:", err);
-    });
+    // רץ רק כל 50 הודעות (במקום כל הודעה) כדי להפחית קריאות ל-Firestore
+    // נבדוק אם זה הודעה מספר 50, 100, 150 וכו' לפני הרצת cleanup
+    const shouldRunCleanup = Math.random() < 0.02; // רק 2% מההודעות יגרמו ל-cleanup (כל 50 בממוצע)
+    if (shouldRunCleanup) {
+      cleanupOldMessages(userId).catch(err => {
+        if (err.code === 8 || err.message?.includes("Quota exceeded")) {
+          console.warn("[ChatMemory] Firestore quota exceeded - skipping cleanup");
+        } else {
+          console.error("[ChatMemory] Background cleanup failed:", err);
+        }
+      });
+    }
 
     return docRef.id;
   } catch (error) {
@@ -89,11 +97,11 @@ export async function getUserConversationHistory(userId, limit = MAX_HISTORY_MES
     const normalizedUserId = userId.toLowerCase().trim();
     
     // טעינת ההודעות של המשתמש - ללא orderBy כדי להימנע מדרישת אינדקס ומגבלת quota
-    // נטען את כל ההודעות ונמיין ב-JavaScript (איטי יותר אבל לא דורש אינדקס)
+    // נטען רק את ה-limit האחרונות ישירות (לא כפול) כדי להפחית קריאות
     const snapshot = await firestoreDb
       .collection("chat_messages")
       .where("userId", "==", normalizedUserId)
-      .limit(limit * 3) // לוקח קצת יותר כדי להיות בטוחים שיש מספיק
+      .limit(limit) // רק את ה-limit האחרונות (לא כפול) כדי להפחית קריאות
       .get();
 
     if (snapshot.empty) {
