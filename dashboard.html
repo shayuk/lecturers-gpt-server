@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <title>לוח ניהול – קבצים שהועלו</title>
+
+  <!-- Firebase SDKs (Compat) -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f8fafc;
+      padding: 20px;
+      direction: rtl;
+    }
+    h1 {
+      color: #2563eb;
+      margin: 0 0 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .sub {
+      color: #64748b;
+      margin-bottom: 14px;
+      font-size: 0.95rem;
+    }
+    .loading {
+      color: #555;
+      margin-top: 10px;
+    }
+    .error {
+      color: #b91c1c;
+      margin-top: 10px;
+      font-weight: 600;
+    }
+    .success {
+      color: #059669;
+      margin-top: 10px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 18px;
+      background: white;
+    }
+    th, td {
+      border: 1px solid #d1d5db;
+      padding: 10px 12px;
+      text-align: center;
+    }
+    th {
+      background: #e0e7ff;
+      font-weight: 700;
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #1e3a8a;
+      font-size: 0.85rem;
+    }
+    .topbar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    input[type="text"]{
+      padding: 8px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      min-width: 220px;
+    }
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .config-warning {
+      background: #fef3c7;
+      border: 1px solid #f59e0b;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 20px;
+      color: #92400e;
+    }
+    .config-warning strong {
+      display: block;
+      margin-bottom: 8px;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>📊 לוח ניהול – קבצים שהועלו <span class="pill">Firestore / rag_chunks</span></h1>
+  <div class="sub">אם את רואה "Missing permissions" – זה אומר שאין התחברות או שה-Rules לא פורסמו.</div>
+
+  <div id="configWarning" class="config-warning" style="display:none">
+    <strong>⚠️ אזהרה: הגדרות Firebase</strong>
+    <div id="configWarningText"></div>
+  </div>
+
+  <div class="topbar">
+    <label>
+      סינון לפי מקור/קורס:
+      <input id="search" type="text" placeholder="למשל: שיעור 1 או statistics" />
+    </label>
+    <button id="refreshBtn">רענון</button>
+  </div>
+
+  <div id="status" class="loading">מתחבר ל-Firebase…</div>
+
+  <table id="results" style="display:none">
+    <thead>
+      <tr>
+        <th>📄 מקור</th>
+        <th>📚 קורס</th>
+        <th>🔢 מספר קטעים</th>
+        <th>📅 העלאה אחרונה</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    /*********************************************************
+     * 1) Firebase Config – זה מפתח של Firebase (Web API Key)
+     *    לא להדביק כאן OpenAI key בשום מצב.
+     *    
+     *    איך למצוא את ה-API Key:
+     *    1. לךי ל-Firebase Console: https://console.firebase.google.com
+     *    2. בחרי את הפרויקט: lecturers-gpt-auth
+     *    3. לךי ל-Project Settings (⚙️) > General
+     *    4. גללי למטה ל-"Your apps" > Web app
+     *    5. העתיקי את ה-apiKey מה-config object
+     *********************************************************/
+    const firebaseConfig = {
+      apiKey: "YOUR_FIREBASE_WEB_API_KEY", // ⚠️ צריך להחליף למפתח האמיתי!
+      authDomain: "lecturers-gpt-auth.firebaseapp.com",
+      projectId: "lecturers-gpt-auth"
+    };
+
+    // בדיקה שהמפתח הוגדר
+    if (!firebaseConfig.apiKey || firebaseConfig.apiKey === "YOUR_FIREBASE_WEB_API_KEY") {
+      document.getElementById('configWarning').style.display = 'block';
+      document.getElementById('configWarningText').innerHTML = 
+        '⚠️ צריך להגדיר את Firebase Web API Key בקוד!<br>' +
+        'לכי ל-Firebase Console > Project Settings > General > Web app > העתיקי את ה-apiKey';
+    }
+
+    try {
+      firebase.initializeApp(firebaseConfig);
+    } catch (err) {
+      console.error("Firebase initialization error:", err);
+      document.getElementById('status').textContent = "❌ שגיאה באתחול Firebase: " + err.message;
+      document.getElementById('status').className = "error";
+    }
+
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+
+    const statusEl = document.getElementById('status');
+    const tableEl = document.getElementById('results');
+    const tbodyEl = tableEl.querySelector('tbody');
+    const searchEl = document.getElementById('search');
+    const refreshBtn = document.getElementById('refreshBtn');
+
+    let groupedRows = [];
+    let autoRefreshInterval = null;
+
+    function setStatus(text, type) {
+      statusEl.textContent = text;
+      statusEl.className = type || "loading";
+    }
+
+    function renderTable(filterText = "") {
+      tbodyEl.innerHTML = "";
+
+      const q = (filterText || "").trim().toLowerCase();
+      const rows = q
+        ? groupedRows.filter(r =>
+            (r.source || "").toLowerCase().includes(q) ||
+            (r.course_name || "").toLowerCase().includes(q)
+          )
+        : groupedRows;
+
+      if (rows.length === 0) {
+        tableEl.style.display = "none";
+        if (groupedRows.length === 0) {
+          setStatus("לא נמצאו נתונים להצגה.", "loading");
+        } else {
+          setStatus("לא נמצאו נתונים תואמים לסינון.", "loading");
+        }
+        return;
+      }
+
+      for (const row of rows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(row.source || "—")}</td>
+          <td>${escapeHtml(row.course_name || "—")}</td>
+          <td>${row.count || 0}</td>
+          <td>${row.lastUploadedAt ? formatDate(row.lastUploadedAt) : "—"}</td>
+        `;
+        tbodyEl.appendChild(tr);
+      }
+
+      setStatus(`✅ נמצאו ${rows.length} רשומות`, "success");
+      tableEl.style.display = "table";
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function formatDate(date) {
+      if (!date) return "—";
+      try {
+        if (date.toDate) {
+          // Firestore Timestamp
+          return date.toDate().toLocaleString('he-IL');
+        }
+        if (date instanceof Date) {
+          return date.toLocaleString('he-IL');
+        }
+        return new Date(date).toLocaleString('he-IL');
+      } catch (e) {
+        return String(date);
+      }
+    }
+
+    async function loadData() {
+      refreshBtn.disabled = true;
+      tableEl.style.display = "none";
+      tbodyEl.innerHTML = "";
+      setStatus("טוען נתונים…", "loading");
+
+      try {
+        // בדיקה שהמשתמש מחובר
+        const currentUser = auth.currentUser;
+        if (!currentUser) {
+          setStatus("❌ לא מחוברת ל-Firebase. מנסה להתחבר מחדש...", "error");
+          await auth.signInAnonymously();
+          return;
+        }
+
+        // קריאה מ-rag_chunks. ה-Rules צריכים לאפשר read אחרי auth.
+        const snapshot = await db.collection("rag_chunks").limit(500).get();
+
+        if (snapshot.empty) {
+          groupedRows = [];
+          renderTable(searchEl.value);
+          setStatus("לא נמצאו נתונים ב-rag_chunks.", "loading");
+          refreshBtn.disabled = false;
+          return;
+        }
+
+        const grouped = {};
+
+        snapshot.forEach(doc => {
+          const d = doc.data();
+          const key = `${d.course_name || ""}__${d.source || ""}`;
+
+          if (!grouped[key]) {
+            grouped[key] = {
+              source: d.source || "—",
+              course_name: d.course_name || "—",
+              count: 0,
+              lastUploadedAt: null
+            };
+          }
+
+          grouped[key].count++;
+
+          // טיפול ב-uploaded_at - יכול להיות string, Timestamp, או בתוך metadata
+          let uploadedAt = d.uploaded_at;
+          if (!uploadedAt && d.metadata && d.metadata.uploaded_at) {
+            uploadedAt = d.metadata.uploaded_at;
+          }
+
+          if (uploadedAt) {
+            let date;
+            try {
+              if (uploadedAt.toDate) {
+                // Firestore Timestamp
+                date = uploadedAt.toDate();
+              } else if (uploadedAt instanceof Date) {
+                date = uploadedAt;
+              } else {
+                date = new Date(uploadedAt);
+              }
+
+              if (!isNaN(date.getTime())) {
+                if (!grouped[key].lastUploadedAt || date > grouped[key].lastUploadedAt) {
+                  grouped[key].lastUploadedAt = date;
+                }
+              }
+            } catch (e) {
+              console.warn("Error parsing date:", uploadedAt, e);
+            }
+          }
+        });
+
+        groupedRows = Object.values(grouped)
+          .sort((a, b) => {
+            const ta = a.lastUploadedAt ? a.lastUploadedAt.getTime() : 0;
+            const tb = b.lastUploadedAt ? b.lastUploadedAt.getTime() : 0;
+            return tb - ta;
+          });
+
+        renderTable(searchEl.value);
+        refreshBtn.disabled = false;
+      } catch (err) {
+        console.error("Error loading data:", err);
+        let errorMsg = "❌ שגיאה בטעינת הנתונים.";
+        
+        if (err.code === 'permission-denied' || err.message?.includes('permission')) {
+          errorMsg += "<br><br>🔒 בעיית הרשאות Firestore:<br>" +
+            "1. ודאי ש-Anonymous Authentication מופעל ב-Firebase Console<br>" +
+            "2. ודאי ש-Firestore Rules פורסמו (allow read: if request.auth != null)<br>" +
+            "3. לכי ל-Firebase Console > Authentication > Sign-in method > Anonymous > Enable";
+        } else if (err.code === 'unauthenticated') {
+          errorMsg += "<br><br>🔐 בעיית התחברות:<br>" +
+            "ודאי ש-Anonymous Authentication מופעל ב-Firebase Console";
+        } else {
+          errorMsg += "<br><br>פרטים: " + err.message;
+        }
+        
+        statusEl.innerHTML = errorMsg;
+        statusEl.className = "error";
+        refreshBtn.disabled = false;
+      }
+    }
+
+    // 2) התחברות אנונימית (חייב להיות Enabled ב-Authentication)
+    auth.signInAnonymously()
+      .then((userCredential) => {
+        console.log("✅ Signed in anonymously:", userCredential.user.uid);
+        setStatus("✅ מחוברת ל-Firebase. טוען נתונים...", "success");
+        loadData();
+        
+        // רענון אוטומטי כל 30 שניות (במקום 5 שניות כדי לא להעמיס)
+        if (autoRefreshInterval) {
+          clearInterval(autoRefreshInterval);
+        }
+        autoRefreshInterval = setInterval(loadData, 30000);
+      })
+      .catch((err) => {
+        console.error("Auth error:", err);
+        let errorMsg = "❌ שגיאת התחברות ל-Firebase.";
+        
+        if (err.code === 'auth/operation-not-allowed') {
+          errorMsg += "<br><br>⚠️ Anonymous Authentication לא מופעל!<br>" +
+            "לכי ל-Firebase Console > Authentication > Sign-in method > Anonymous > Enable";
+        } else if (err.code === 'auth/api-key-not-valid') {
+          errorMsg += "<br><br>⚠️ Firebase API Key לא תקין!<br>" +
+            "ודאי שהמפתח בקוד נכון (Firebase Console > Project Settings > Web app)";
+        } else {
+          errorMsg += "<br><br>פרטים: " + err.message;
+        }
+        
+        statusEl.innerHTML = errorMsg;
+        statusEl.className = "error";
+      });
+
+    // UI events
+    searchEl.addEventListener("input", () => renderTable(searchEl.value));
+    refreshBtn.addEventListener("click", loadData);
+  </script>
+</body>
+</html>
