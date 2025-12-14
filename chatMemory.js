@@ -130,6 +130,10 @@ export async function getUserConversationHistory(userId, limit = MAX_HISTORY_MES
     if (messages.length > 0) {
       console.log(`[ChatMemory] First message: ${messages[0].role} - ${messages[0].content.substring(0, 50)}...`);
       console.log(`[ChatMemory] Last message: ${messages[messages.length - 1].role} - ${messages[messages.length - 1].content.substring(0, 50)}...`);
+      // לוג מפורט יותר כדי לבדוק שההיסטוריה נטענת נכון
+      console.log(`[ChatMemory] Full history:`, JSON.stringify(messages.map(m => ({ role: m.role, content: m.content.substring(0, 100) })), null, 2));
+    } else {
+      console.warn(`[ChatMemory] No messages loaded - this might cause context loss!`);
     }
     return messages;
   } catch (error) {

@@ -294,7 +294,13 @@ app.post("/api/ask", async (req, res) => {
     
     let conversationHistory = [];
     if (chatMemoryEnabled) {
-      try { conversationHistory = await getUserConversationHistory(rawEmail); } catch (e) {}
+      try { 
+        conversationHistory = await getUserConversationHistory(rawEmail);
+        console.log(`[API] Loaded ${conversationHistory.length} messages from history for context`);
+      } catch (e) {
+        console.error(`[API] Failed to load conversation history:`, e?.message || e);
+        conversationHistory = [];
+      }
     }
 
     const messages = [
@@ -302,6 +308,9 @@ app.post("/api/ask", async (req, res) => {
       ...conversationHistory,
       { role: "user", content: prompt }
     ];
+    
+    // לוג כדי לבדוק שההיסטוריה נשלחת נכון ל-OpenAI
+    console.log(`[API] Sending ${messages.length} messages to OpenAI (${conversationHistory.length} from history)`);
 
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
@@ -435,10 +444,17 @@ async function handleStreamingRequest(req, res) {
       ...conversationHistory,
       { role: "user", content: prompt }
     ];
+    
+    // לוג כדי לבדוק שההיסטוריה נשלחת נכון ל-OpenAI
+    console.log(`[Streaming] Sending ${messages.length} messages to OpenAI (${conversationHistory.length} from history)`);
 
     // שמירת הודעת המשתמש ברקע (לא חוסם את התגובה)
     if (chatMemoryEnabled) {
-      saveChatMessage(rawEmail, "user", prompt).catch(() => {});
+      saveChatMessage(rawEmail, "user", prompt).catch((e) => {
+        if (e.code === 8 || e.message?.includes("Quota exceeded")) {
+          console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
+        }
+      });
     }
     
     // אם זה נושא חדש: במקום להזרים מהמודל (שקשה לאכוף בזמן אמת), מבצעים completion קצר,
