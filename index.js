@@ -272,12 +272,17 @@ app.post("/api/ask", async (req, res) => {
 
     let ragContext = null;
     // בשלב אבחון (נושא חדש) – לא מושכים RAG כדי לא לעודד "הסברים".
+    // גם אם יש quota exceeded, נדלג על RAG כדי לא להחמיר את הבעיה
     if (ragEnabled && !turn.diagnosisOnly) {
       try {
-        const ragPromise = getRAGContext(turn.ragQuery || prompt, 5);
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 20000));
+        const ragPromise = getRAGContext(turn.ragQuery || prompt, 3); // הקטנתי מ-5 ל-3 כדי להפחית קריאות
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 3000)); // הוקטן מ-20 ל-3 שניות
         ragContext = await Promise.race([ragPromise, timeoutPromise]);
       } catch (e) {
+        // אם יש שגיאת quota, נדלג על RAG לחלוטין
+        if (e.code === 8 || e.message?.includes("Quota exceeded") || e.message?.includes("RESOURCE_EXHAUSTED")) {
+          console.warn("[RAG] Firestore quota exceeded - skipping RAG to reduce reads");
+        }
         ragContext = null;
       }
     }
