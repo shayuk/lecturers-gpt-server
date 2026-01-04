@@ -593,32 +593,36 @@ app.post("/api/ask", async (req, res) => {
       answer = forcedDiagnosticTemplate(turn.activeTopic);
     }
 
-    // שמירת הודעות ומצב במקביל (לא חוסם את התגובה)
+    // שמירת הודעות ומצב - await critical writes before finalizing
     // Cache updates happen AFTER successful writes (write-through cache)
     const maxStoredMessages = parseInt(MAX_STORED_MESSAGES_PER_USER || "200", 10);
-    Promise.all([
-      chatMemoryEnabled ? (async () => {
+    
+    // Await critical message saves and cache updates before finalizing request
+    if (chatMemoryEnabled) {
+      try {
         // Save user message first, then update cache
-        try {
-          await saveChatMessage(rawEmail, "user", prompt);
-          updateHistoryCache(rawEmail, { role: "user", content: prompt }, maxStoredMessages);
-          console.log(`[Cache] history UPDATED after user message write`);
-        } catch (e) {
-          if (e.code === 8 || e.message?.includes("Quota exceeded")) {
-            console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
-          }
+        await saveChatMessage(rawEmail, "user", prompt);
+        updateHistoryCache(rawEmail, { role: "user", content: prompt }, maxStoredMessages);
+        console.log(`[Cache] history UPDATED after user message write`);
+      } catch (e) {
+        if (e.code === 8 || e.message?.includes("Quota exceeded")) {
+          console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
         }
-        // Save assistant message second, then update cache (ensures correct ordering)
-        try {
-          await saveChatMessage(rawEmail, "assistant", answer);
-          updateHistoryCache(rawEmail, { role: "assistant", content: answer }, maxStoredMessages);
-          console.log(`[Cache] history UPDATED after assistant message write`);
-        } catch (e) {
-          if (e.code === 8 || e.message?.includes("Quota exceeded")) {
-            console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
-          }
+      }
+      // Save assistant message second, then update cache (ensures correct ordering)
+      try {
+        await saveChatMessage(rawEmail, "assistant", answer);
+        updateHistoryCache(rawEmail, { role: "assistant", content: answer }, maxStoredMessages);
+        console.log(`[Cache] history UPDATED after assistant message write`);
+      } catch (e) {
+        if (e.code === 8 || e.message?.includes("Quota exceeded")) {
+          console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
         }
-      })() : Promise.resolve(),
+      }
+    }
+    
+    // Non-critical writes can run in background
+    Promise.all([
       db ? db.collection("usage_logs").add({
         email: rawEmail,
         model: completion?.model || OPENAI_MODEL,
@@ -855,19 +859,19 @@ async function handleStreamingRequest(req, res) {
       total_estimated_tokens: totalEstimatedTokens
     });
 
-    // שמירת הודעת המשתמש ברקע (לא חוסם את התגובה)
+    // שמירת הודעת המשתמש - await before proceeding to ensure history is ready
     // Cache updates happen AFTER successful writes (write-through cache)
     const maxStoredMessages = parseInt(MAX_STORED_MESSAGES_PER_USER || "200", 10);
     if (chatMemoryEnabled) {
-      saveChatMessage(rawEmail, "user", prompt).then(() => {
-        // Update history cache after successful write
+      try {
+        await saveChatMessage(rawEmail, "user", prompt);
         updateHistoryCache(rawEmail, { role: "user", content: prompt }, maxStoredMessages);
         console.log(`[Cache] history UPDATED after user message write`);
-      }).catch((e) => {
+      } catch (e) {
         if (e.code === 8 || e.message?.includes("Quota exceeded")) {
           console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
         }
-      });
+      }
     }
 
     // אם זה נושא חדש: במקום להזרים מהמודל (שקשה לאכוף בזמן אמת), מבצעים completion קצר,
@@ -902,18 +906,19 @@ async function handleStreamingRequest(req, res) {
         res.write(`data: ${JSON.stringify({ type: "sources", sources: ragContext.sources })}\n\n`);
       }
 
-      // שמירת הודעת הבוט ומצב ברקע (לא חוסם את התגובה)
+      // שמירת הודעת הבוט - await before finalizing request
       if (chatMemoryEnabled && fullAnswer.trim()) {
-        saveChatMessage(rawEmail, "assistant", fullAnswer).then(() => {
-          // Update history cache after successful write
+        try {
+          await saveChatMessage(rawEmail, "assistant", fullAnswer);
           updateHistoryCache(rawEmail, { role: "assistant", content: fullAnswer }, maxStoredMessages);
           console.log(`[Cache] history UPDATED after assistant message write`);
-        }).catch((e) => {
+        } catch (e) {
           if (e.code === 8 || e.message?.includes("Quota exceeded")) {
             console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
           }
-        });
+        }
       }
+      // Non-critical state save can run in background
       saveUserState(db, turn.nextState).then((success) => {
         // Update state cache after successful write
         if (success) {
@@ -963,14 +968,19 @@ async function handleStreamingRequest(req, res) {
       res.write(`data: ${JSON.stringify({ type: "sources", sources: ragContext.sources })}\n\n`);
     }
 
-    // שמירת הודעת הבוט ומצב ברקע (לא חוסם את התגובה)
+    // שמירת הודעת הבוט - await before finalizing request
     if (chatMemoryEnabled && fullAnswer.trim()) {
-      saveChatMessage(rawEmail, "assistant", fullAnswer).then(() => {
-        // Update history cache after successful write
+      try {
+        await saveChatMessage(rawEmail, "assistant", fullAnswer);
         updateHistoryCache(rawEmail, { role: "assistant", content: fullAnswer }, maxStoredMessages);
         console.log(`[Cache] history UPDATED after assistant message write`);
-      }).catch(() => {});
+      } catch (e) {
+        if (e.code === 8 || e.message?.includes("Quota exceeded")) {
+          console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
+        }
+      }
     }
+    // Non-critical state save can run in background
     saveUserState(db, turn.nextState).then((success) => {
       // Update state cache after successful write
       if (success) {
