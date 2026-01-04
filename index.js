@@ -17,6 +17,11 @@ import {
   forcedDiagnosticTemplate,
   defaultUserState
 } from "./topicState.js";
+import { generateRequestId, logPerformance, logTokenUsage, logPromptSize, estimateTokens, estimateMessagesTokens } from "./performanceLogger.js";
+import { getCache, setCache, deleteCache, getConversationHistoryKey, getUserStateKey, DEFAULT_TTL, getStateCached, getHistoryCached, updateHistoryCache, updateStateCache, getFirstLoginCached } from "./cache.js";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, resolve } from "path";
 
 /**
  * Cleans and normalizes LaTeX formulas in the bot's response
@@ -77,7 +82,8 @@ const {
   USE_RAG = "true",
   ENABLE_STREAMING = "true",
   MAX_HISTORY_MESSAGES = "20",
-  MAX_STORED_MESSAGES_PER_USER = "200"
+  MAX_STORED_MESSAGES_PER_USER = "200",
+  RAG_MAX_DOCS = "50"
 } = process.env;
 
 function normalizePrivateKey(raw) {
@@ -119,13 +125,20 @@ const corsOptions = {
 
 const app = express();
 
+// Request ID middleware for correlation tracking
+app.use((req, res, next) => {
+  req.requestId = req.headers["x-request-id"] || generateRequestId();
+  res.setHeader("X-Request-ID", req.requestId);
+  next();
+});
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && allowedOrigins.indexOf(origin) !== -1) {
     res.header("Access-Control-Allow-Origin", origin);
   }
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message, x-stream, accept");
+  res.header("Access-Control-Allow-Headers", "Content-Type, authorization, x-api-secret, x-gpt-user-message, x-stream, accept, x-request-id");
   res.header("Access-Control-Allow-Credentials", "true");
   
   if (req.method === "OPTIONS") {
@@ -166,19 +179,80 @@ const handleMulterError = (err, req, res, next) => {
 
 if (!OPENAI_API_KEY) console.warn("[WARN] Missing OPENAI_API_KEY");
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
 let firebaseApp;
 try {
-  const pk = normalizePrivateKey(FIREBASE_PRIVATE_KEY);
-  firebaseApp = admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: FIREBASE_PROJECT_ID,
-      clientEmail: FIREBASE_CLIENT_EMAIL,
-      privateKey: pk,
-    }),
-  });
-  console.log("[OK] Firebase initialized:", FIREBASE_PROJECT_ID);
+  // Option A: Try GOOGLE_APPLICATION_CREDENTIALS first (recommended for local development)
+  const googleAppCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (googleAppCreds) {
+    try {
+      const credsPath = resolve(__dirname, googleAppCreds);
+      const serviceAccount = JSON.parse(readFileSync(credsPath, "utf8"));
+      
+      // Validate required fields
+      if (!serviceAccount.project_id || typeof serviceAccount.project_id !== "string") {
+        throw new Error(`Service account JSON at ${credsPath} is missing or has invalid 'project_id' property`);
+      }
+      if (!serviceAccount.private_key || typeof serviceAccount.private_key !== "string") {
+        throw new Error(`Service account JSON at ${credsPath} is missing or has invalid 'private_key' property`);
+      }
+      if (!serviceAccount.client_email || typeof serviceAccount.client_email !== "string") {
+        throw new Error(`Service account JSON at ${credsPath} is missing or has invalid 'client_email' property`);
+      }
+
+      firebaseApp = admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+      });
+      console.log("[OK] Firebase initialized from GOOGLE_APPLICATION_CREDENTIALS:", serviceAccount.project_id);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        throw new Error(`Firebase credentials file not found: ${googleAppCreds}. Check GOOGLE_APPLICATION_CREDENTIALS path.`);
+      }
+      if (error instanceof SyntaxError) {
+        throw new Error(`Invalid JSON in Firebase credentials file: ${googleAppCreds}. Error: ${error.message}`);
+      }
+      throw error;
+    }
+  } else {
+    // Fallback: Use environment variables
+    if (!FIREBASE_PROJECT_ID || typeof FIREBASE_PROJECT_ID !== "string" || FIREBASE_PROJECT_ID.trim() === "") {
+      throw new Error(
+        "Firebase credentials missing: FIREBASE_PROJECT_ID is not set or empty. " +
+        "Set GOOGLE_APPLICATION_CREDENTIALS to point to a service account JSON file, " +
+        "or set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY environment variables."
+      );
+    }
+    if (!FIREBASE_CLIENT_EMAIL || typeof FIREBASE_CLIENT_EMAIL !== "string" || FIREBASE_CLIENT_EMAIL.trim() === "") {
+      throw new Error(
+        "Firebase credentials missing: FIREBASE_CLIENT_EMAIL is not set or empty. " +
+        "Set GOOGLE_APPLICATION_CREDENTIALS to point to a service account JSON file, " +
+        "or set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY environment variables."
+      );
+    }
+    
+    const pk = normalizePrivateKey(FIREBASE_PRIVATE_KEY);
+    if (!pk || pk.trim() === "") {
+      throw new Error(
+        "Firebase credentials missing: FIREBASE_PRIVATE_KEY is not set or empty. " +
+        "Set GOOGLE_APPLICATION_CREDENTIALS to point to a service account JSON file, " +
+        "or set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY environment variables."
+      );
+    }
+
+    firebaseApp = admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId: FIREBASE_PROJECT_ID.trim(),
+        clientEmail: FIREBASE_CLIENT_EMAIL.trim(),
+        privateKey: pk,
+      }),
+    });
+    console.log("[OK] Firebase initialized from environment variables:", FIREBASE_PROJECT_ID);
+  }
 } catch (e) {
-  console.error("[Firebase Init Error]", e);
+  console.error("[Firebase Init Error]", e.message || e);
+  throw e; // Re-throw to prevent silent failures
 }
 
 const db = admin.apps.length ? admin.firestore() : null;
@@ -236,6 +310,11 @@ async function checkAndMarkFirstLogin(rawEmail) {
   }
 }
 
+// Wrapper function for caching - matches signature expected by getFirstLoginCached
+async function checkAndMarkFirstLoginWrapper(db, email) {
+  return await checkAndMarkFirstLogin(email);
+}
+
 app.get("/", (_req, res) => {
   res.json({ ok: true, status: "Lecturers GPT server is running" });
 });
@@ -270,6 +349,10 @@ app.delete("/api/chat-history/:email", async (req, res) => {
     if (deleted) {
       // גם נמחק את ה-state של המשתמש
       await saveUserState(db, defaultUserState(rawEmail));
+      
+      // Invalidate caches
+      deleteCache(getConversationHistoryKey(rawEmail));
+      deleteCache(getUserStateKey(rawEmail));
       
       return res.json({ 
         success: true, 
@@ -307,6 +390,9 @@ app.post("/api/ask", async (req, res) => {
     return handleStreamingRequest(req, res);
   }
   
+  const requestId = req.requestId || generateRequestId();
+  const startTime = Date.now();
+  
   try {
     const rawEmail = (req.body?.email || "").trim().toLowerCase();
     const prompt = (req.body?.prompt || req.headers["x-gpt-user-message"] || "").trim();
@@ -314,66 +400,178 @@ app.post("/api/ask", async (req, res) => {
     if (!rawEmail) return res.status(400).json({ error: "email is required" });
     if (!prompt) return res.status(400).json({ error: "prompt is required" });
 
+    logPerformance(requestId, "start", Date.now() - startTime);
+
     // (Auth Check Simplified for brevity)
     const bypass = BYPASS_AUTH.toLowerCase() === "true";
     if (!bypass) {
        // ... auth logic here ...
     }
 
-    const { first_login } = await checkAndMarkFirstLogin(rawEmail);
+    // Parallelize independent Firestore reads: first_login check, user state, and conversation history
+    const firestoreStartTime = Date.now();
+    const firstLoginStartTime = Date.now();
+    
+    const [firstLoginResult, stateResult, historyResult] = await Promise.all([
+      getFirstLoginCached(db, rawEmail, requestId, checkAndMarkFirstLoginWrapper).then(result => {
+        const firstLoginMs = Date.now() - firstLoginStartTime;
+        console.log(`[RID:${requestId}] firestore_read first_login ms=${firstLoginMs} cached=${result.cached}`);
+        return result;
+      }),
+      getStateCached(db, rawEmail, requestId, loadUserState),
+      getHistoryCached(chatMemoryEnabled, rawEmail, requestId, getUserConversationHistory)
+    ]);
+    
+    const { first_login } = firstLoginResult;
+    const userState = stateResult.state;
+    const conversationHistory = historyResult.history;
+    const stateCacheHit = stateResult.cached;
+    const historyCacheHit = historyResult.cached;
+    const firstLoginCacheHit = firstLoginResult.cached;
+    
+    const firestoreReadsMs = Date.now() - firestoreStartTime;
+    const readsPerformed = [];
+    if (!stateCacheHit) readsPerformed.push("state");
+    if (!historyCacheHit) readsPerformed.push("history");
+    if (!firstLoginCacheHit) readsPerformed.push("first_login");
+    
+    logPerformance(requestId, "firestore_reads", firestoreReadsMs, {
+      cached_state: stateCacheHit,
+      cached_history: historyCacheHit,
+      cached_first_login: firstLoginCacheHit,
+      reads: readsPerformed.join(",") || "none"
+    });
 
     // -----------------------------
     // Galibot Enforcement: Topic State Machine (NEW)
     // -----------------------------
-    const userState = await loadUserState(db, rawEmail);
     const turn = decideTurn(prompt, userState);
 
     let ragContext = null;
+    const ragStartTime = Date.now();
     // בשלב אבחון (נושא חדש) – לא מושכים RAG כדי לא לעודד "הסברים".
     // גם אם יש quota exceeded, נדלג על RAG כדי לא להחמיר את הבעיה
     if (ragEnabled && !turn.diagnosisOnly) {
       try {
-        const ragPromise = getRAGContext(turn.ragQuery || prompt, 3); // הקטנתי מ-5 ל-3 כדי להפחית קריאות
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 3000)); // הוקטן מ-20 ל-3 שניות
-        ragContext = await Promise.race([ragPromise, timeoutPromise]);
+        // חילוץ course_name מה-context או ברירת מחדל "statistics"
+        const courseName = req.body?.course_name || "statistics";
+        const maxDocs = parseInt(RAG_MAX_DOCS || "50", 10);
+        const RAG_TIMEOUT_MS = 400; // Fail fast timeout
+        
+        // Use AbortController for proper cancellation (rag.js handles Promise.race internally)
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => abortController.abort(), RAG_TIMEOUT_MS);
+        
+        try {
+          ragContext = await getRAGContext(turn.ragQuery || prompt, 3, courseName, maxDocs, RAG_TIMEOUT_MS, abortController.signal);
+          clearTimeout(timeoutId);
+          
+          // Log with detailed metrics (metrics.rag_total_ms is the actual awaited duration from rag.js)
+          const metrics = ragContext?._metrics || {};
+          logPerformance(requestId, "rag", metrics.rag_total_ms || (Date.now() - ragStartTime), {
+            status: metrics.status || "unknown",
+            maxDocs: metrics.maxDocs || maxDocs,
+            retrieved_count: metrics.retrieved_count || 0,
+            processed_count: metrics.processed_count || 0,
+            returned_count: metrics.returned_count || 0,
+            rag_total_ms: metrics.rag_total_ms || (Date.now() - ragStartTime)
+          });
+        } catch (ragError) {
+          clearTimeout(timeoutId);
+          // Timeout is handled by rag.js Promise.race, so this should rarely happen
+          // But if it does, log it with actual duration
+          const ragTotalMs = Date.now() - ragStartTime;
+          ragContext = null;
+          logPerformance(requestId, "rag", ragTotalMs, { 
+            status: "timeout",
+            maxDocs,
+            retrieved_count: 0,
+            processed_count: 0,
+            returned_count: 0
+          });
+        }
       } catch (e) {
         // אם יש שגיאת quota, נדלג על RAG לחלוטין
         if (e.code === 8 || e.message?.includes("Quota exceeded") || e.message?.includes("RESOURCE_EXHAUSTED")) {
           console.warn("[RAG] Firestore quota exceeded - skipping RAG to reduce reads");
+          logPerformance(requestId, "rag", Date.now() - ragStartTime, { 
+            status: "quota_exceeded",
+            maxDocs: parseInt(RAG_MAX_DOCS || "50", 10),
+            retrieved_count: 0,
+            processed_count: 0,
+            returned_count: 0
+          });
+        } else {
+          logPerformance(requestId, "rag", Date.now() - ragStartTime, { 
+            status: "error",
+            error: e.message,
+            maxDocs: parseInt(RAG_MAX_DOCS || "50", 10),
+            retrieved_count: 0,
+            processed_count: 0,
+            returned_count: 0
+          });
         }
         ragContext = null;
       }
     }
 
-    let systemPrompt = buildGalibotSystemPrompt(ragContext);
+    let systemPrompt = buildGalibotSystemPrompt(ragContext, requestId);
     if (turn.diagnosisOnly) {
       systemPrompt = applyDiagnosisEnforcement(systemPrompt);
     }
+
+    // Token-based history limiting: max 1500 tokens OR last 8 messages (whichever is more restrictive)
+    const MAX_HISTORY_TOKENS = 1500;
+    const MAX_HISTORY_MESSAGES_FALLBACK = 8;
     
-    let conversationHistory = [];
-    if (chatMemoryEnabled) {
-      try { 
-        conversationHistory = await getUserConversationHistory(rawEmail);
-        console.log(`[API] Loaded ${conversationHistory.length} messages from history for context`);
-      } catch (e) {
-        console.error(`[API] Failed to load conversation history:`, e?.message || e);
-        conversationHistory = [];
+    let limitedHistory = conversationHistory;
+    const historyTokens = estimateMessagesTokens(conversationHistory);
+    
+    if (historyTokens > MAX_HISTORY_TOKENS) {
+      // Trim from oldest messages until we're under token limit
+      let trimmedTokens = 0;
+      let keepCount = 0;
+      for (let i = conversationHistory.length - 1; i >= 0; i--) {
+        const msgTokens = estimateTokens(conversationHistory[i].content || "") + 10;
+        if (trimmedTokens + msgTokens <= MAX_HISTORY_TOKENS) {
+          trimmedTokens += msgTokens;
+          keepCount++;
+        } else {
+          break;
+        }
       }
+      limitedHistory = conversationHistory.slice(-keepCount);
+      console.log(`[RID:${requestId}] history_trimmed tokens=${historyTokens}->${estimateMessagesTokens(limitedHistory)} messages=${conversationHistory.length}->${limitedHistory.length}`);
+    } else if (conversationHistory.length > MAX_HISTORY_MESSAGES_FALLBACK) {
+      // Fallback: if message count exceeds limit, keep last N messages
+      limitedHistory = conversationHistory.slice(-MAX_HISTORY_MESSAGES_FALLBACK);
+      console.log(`[RID:${requestId}] history_trimmed_by_count messages=${conversationHistory.length}->${limitedHistory.length}`);
     }
 
     const messages = [
       { role: "system", content: systemPrompt },
-      ...conversationHistory,
+      ...limitedHistory,
       { role: "user", content: prompt }
     ];
     
-    // לוג כדי לבדוק שההיסטוריה נשלחת נכון ל-OpenAI
-    console.log(`[API] Sending ${messages.length} messages to OpenAI (${conversationHistory.length} from history)`);
-    console.log(`[API] Current topic: ${turn.activeTopic}, Phase: ${turn.nextState.phase}, DiagnosisOnly: ${turn.diagnosisOnly}`);
-    if (conversationHistory.length > 0) {
-      console.log(`[API] Last 2 messages from history:`, conversationHistory.slice(-2).map(m => ({ role: m.role, content: m.content.substring(0, 100) })));
-    }
+    const systemPromptChars = systemPrompt.length;
+    const systemPromptTokens = estimateTokens(systemPrompt);
+    const historyTokensFinal = estimateMessagesTokens(limitedHistory);
+    const userPromptTokens = estimateTokens(prompt);
+    const totalEstimatedTokens = systemPromptTokens + historyTokensFinal + userPromptTokens;
+    
+    const promptSize = JSON.stringify(messages).length;
+    logPromptSize(requestId, promptSize, messages.length);
+    logPerformance(requestId, "prompt_breakdown", 0, {
+      system_chars: systemPromptChars,
+      system_tokens: systemPromptTokens,
+      history_messages: limitedHistory.length,
+      history_tokens: historyTokensFinal,
+      user_tokens: userPromptTokens,
+      total_estimated_tokens: totalEstimatedTokens
+    });
 
+    const openaiStartTime = Date.now();
     const completion = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: messages,
@@ -381,6 +579,11 @@ app.post("/api/ask", async (req, res) => {
       // מגביל כדי לצמצם "דאמפ" מידע; במצב full-solution מאפשרים יותר
       max_tokens: turn.wantsFastPass ? 1200 : (turn.diagnosisOnly ? 140 : 420)
     });
+    logPerformance(requestId, "openai_call", Date.now() - openaiStartTime);
+    
+    if (completion?.usage) {
+      logTokenUsage(requestId, completion.usage);
+    }
 
     let answer = completion?.choices?.[0]?.message?.content?.trim() || "";
     answer = cleanLaTeXFormulas(answer);
@@ -391,19 +594,31 @@ app.post("/api/ask", async (req, res) => {
     }
 
     // שמירת הודעות ומצב במקביל (לא חוסם את התגובה)
+    // Cache updates happen AFTER successful writes (write-through cache)
+    const maxStoredMessages = parseInt(MAX_STORED_MESSAGES_PER_USER || "200", 10);
     Promise.all([
-      chatMemoryEnabled ? Promise.all([
-        saveChatMessage(rawEmail, "user", prompt).catch((e) => {
+      chatMemoryEnabled ? (async () => {
+        // Save user message first, then update cache
+        try {
+          await saveChatMessage(rawEmail, "user", prompt);
+          updateHistoryCache(rawEmail, { role: "user", content: prompt }, maxStoredMessages);
+          console.log(`[Cache] history UPDATED after user message write`);
+        } catch (e) {
           if (e.code === 8 || e.message?.includes("Quota exceeded")) {
             console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
           }
-        }),
-        saveChatMessage(rawEmail, "assistant", answer).catch((e) => {
+        }
+        // Save assistant message second, then update cache (ensures correct ordering)
+        try {
+          await saveChatMessage(rawEmail, "assistant", answer);
+          updateHistoryCache(rawEmail, { role: "assistant", content: answer }, maxStoredMessages);
+          console.log(`[Cache] history UPDATED after assistant message write`);
+        } catch (e) {
           if (e.code === 8 || e.message?.includes("Quota exceeded")) {
             console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
           }
-        })
-      ]) : Promise.resolve(),
+        }
+      })() : Promise.resolve(),
       db ? db.collection("usage_logs").add({
         email: rawEmail,
         model: completion?.model || OPENAI_MODEL,
@@ -413,8 +628,16 @@ app.post("/api/ask", async (req, res) => {
           console.warn("[UsageLogs] Firestore quota exceeded - skipping log");
         }
       }) : Promise.resolve(),
-      saveUserState(db, turn.nextState)
+      saveUserState(db, turn.nextState).then((success) => {
+        // Update state cache after successful write
+        if (success) {
+          updateStateCache(rawEmail, turn.nextState);
+          console.log(`[Cache] state UPDATED after state write`);
+        }
+      })
     ]).catch(() => {}); // לא נזרוק שגיאה - זה לא קריטי
+
+    logPerformance(requestId, "end", Date.now() - startTime);
 
     return res.json({ 
       answer, 
@@ -424,6 +647,7 @@ app.post("/api/ask", async (req, res) => {
     });
 
   } catch (e) {
+    logPerformance(requestId, "error", Date.now() - startTime, { error: e.message });
     console.error(e);
     return res.status(500).json({ error: "Server error" });
   }
@@ -441,10 +665,13 @@ app.options("/api/ask/stream", (req, res) => {
 });
 
 async function handleStreamingRequest(req, res) {
+  const requestId = req.requestId || generateRequestId();
+  const startTime = Date.now();
   const origin = req.headers.origin;
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Request-ID", requestId);
   
   if (origin && allowedOrigins.indexOf(origin) !== -1) {
     res.setHeader("Access-Control-Allow-Origin", origin);
@@ -466,72 +693,200 @@ async function handleStreamingRequest(req, res) {
       return;
     }
 
-    const { first_login } = await checkAndMarkFirstLogin(rawEmail);
+    logPerformance(requestId, "start", Date.now() - startTime);
 
-    // -----------------------------
-    // Galibot Enforcement: Topic State Machine (NEW)
-    // -----------------------------
-    // טעינת userState ו-conversationHistory במקביל כדי לשפר ביצועים
-    const [userState, conversationHistory] = await Promise.all([
-      loadUserState(db, rawEmail),
-      chatMemoryEnabled ? getUserConversationHistory(rawEmail).catch(() => []) : Promise.resolve([])
+    // Parallelize independent Firestore reads: first_login check, user state, and conversation history
+    const firestoreStartTime = Date.now();
+    const firstLoginStartTime = Date.now();
+    
+    const [firstLoginResult, stateResult, historyResult] = await Promise.all([
+      getFirstLoginCached(db, rawEmail, requestId, checkAndMarkFirstLoginWrapper).then(result => {
+        const firstLoginMs = Date.now() - firstLoginStartTime;
+        console.log(`[RID:${requestId}] firestore_read first_login ms=${firstLoginMs} cached=${result.cached}`);
+        return result;
+      }),
+      getStateCached(db, rawEmail, requestId, loadUserState),
+      getHistoryCached(chatMemoryEnabled, rawEmail, requestId, getUserConversationHistory)
     ]);
+    
+    const { first_login } = firstLoginResult;
+    const userState = stateResult.state;
+    const conversationHistory = historyResult.history;
+    const stateCacheHit = stateResult.cached;
+    const historyCacheHit = historyResult.cached;
+    const firstLoginCacheHit = firstLoginResult.cached;
+    
+    const firestoreReadsMs = Date.now() - firestoreStartTime;
+    const readsPerformed = [];
+    if (!stateCacheHit) readsPerformed.push("state");
+    if (!historyCacheHit) readsPerformed.push("history");
+    if (!firstLoginCacheHit) readsPerformed.push("first_login");
+    
+    logPerformance(requestId, "firestore_reads", firestoreReadsMs, {
+      cached_state: stateCacheHit,
+      cached_history: historyCacheHit,
+      cached_first_login: firstLoginCacheHit,
+      reads: readsPerformed.join(",") || "none"
+    });
     
     const turn = decideTurn(prompt, userState);
 
     let ragContext = null;
+    const ragStartTime = Date.now();
     // בשלב אבחון (נושא חדש) – לא מושכים RAG כדי לא לעודד "הסברים".
     // גם אם יש quota exceeded, נדלג על RAG כדי לא להחמיר את הבעיה
     if (ragEnabled && !turn.diagnosisOnly) {
       try {
-        const ragPromise = getRAGContext(turn.ragQuery || prompt, 3); // הקטנתי מ-5 ל-3 כדי להפחית קריאות
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 3000)); // הוקטן מ-5 ל-3 שניות
-        ragContext = await Promise.race([ragPromise, timeoutPromise]);
+        // חילוץ course_name מה-context או ברירת מחדל "statistics"
+        const courseName = req.body?.course_name || "statistics";
+        const maxDocs = parseInt(RAG_MAX_DOCS || "50", 10);
+        const RAG_TIMEOUT_MS = 400; // Fail fast timeout
+        
+        // Use AbortController for proper cancellation (rag.js handles Promise.race internally)
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => abortController.abort(), RAG_TIMEOUT_MS);
+        
+        try {
+          ragContext = await getRAGContext(turn.ragQuery || prompt, 3, courseName, maxDocs, RAG_TIMEOUT_MS, abortController.signal);
+          clearTimeout(timeoutId);
+          
+          // Log with detailed metrics (metrics.rag_total_ms is the actual awaited duration from rag.js)
+          const metrics = ragContext?._metrics || {};
+          logPerformance(requestId, "rag", metrics.rag_total_ms || (Date.now() - ragStartTime), {
+            status: metrics.status || "unknown",
+            maxDocs: metrics.maxDocs || maxDocs,
+            retrieved_count: metrics.retrieved_count || 0,
+            processed_count: metrics.processed_count || 0,
+            returned_count: metrics.returned_count || 0,
+            rag_total_ms: metrics.rag_total_ms || (Date.now() - ragStartTime)
+          });
+        } catch (ragError) {
+          clearTimeout(timeoutId);
+          // Timeout is handled by rag.js Promise.race, so this should rarely happen
+          // But if it does, log it with actual duration
+          const ragTotalMs = Date.now() - ragStartTime;
+          ragContext = null;
+          logPerformance(requestId, "rag", ragTotalMs, { 
+            status: "timeout",
+            maxDocs,
+            retrieved_count: 0,
+            processed_count: 0,
+            returned_count: 0
+          });
+        }
       } catch (e) {
         // אם יש שגיאת quota, נדלג על RAG לחלוטין
         if (e.code === 8 || e.message?.includes("Quota exceeded") || e.message?.includes("RESOURCE_EXHAUSTED")) {
           console.warn("[RAG] Firestore quota exceeded - skipping RAG to reduce reads");
+          logPerformance(requestId, "rag", Date.now() - ragStartTime, { 
+            status: "quota_exceeded",
+            maxDocs: parseInt(RAG_MAX_DOCS || "50", 10),
+            retrieved_count: 0,
+            processed_count: 0,
+            returned_count: 0
+          });
+        } else {
+          logPerformance(requestId, "rag", Date.now() - ragStartTime, { 
+            status: "error",
+            error: e.message,
+            maxDocs: parseInt(RAG_MAX_DOCS || "50", 10),
+            retrieved_count: 0,
+            processed_count: 0,
+            returned_count: 0
+          });
         }
         ragContext = null;
       }
     }
 
-    let systemPrompt = buildGalibotSystemPrompt(ragContext);
+    let systemPrompt = buildGalibotSystemPrompt(ragContext, requestId);
     if (turn.diagnosisOnly) {
       systemPrompt = applyDiagnosisEnforcement(systemPrompt);
     }
 
+    // Token-based history limiting: max 1500 tokens OR last 8 messages (whichever is more restrictive)
+    const MAX_HISTORY_TOKENS = 1500;
+    const MAX_HISTORY_MESSAGES_FALLBACK = 8;
+    
+    let limitedHistory = conversationHistory;
+    const historyTokens = estimateMessagesTokens(conversationHistory);
+    
+    if (historyTokens > MAX_HISTORY_TOKENS) {
+      // Trim from oldest messages until we're under token limit
+      let trimmedTokens = 0;
+      let keepCount = 0;
+      for (let i = conversationHistory.length - 1; i >= 0; i--) {
+        const msgTokens = estimateTokens(conversationHistory[i].content || "") + 10;
+        if (trimmedTokens + msgTokens <= MAX_HISTORY_TOKENS) {
+          trimmedTokens += msgTokens;
+          keepCount++;
+        } else {
+          break;
+        }
+      }
+      limitedHistory = conversationHistory.slice(-keepCount);
+      console.log(`[RID:${requestId}] history_trimmed tokens=${historyTokens}->${estimateMessagesTokens(limitedHistory)} messages=${conversationHistory.length}->${limitedHistory.length}`);
+    } else if (conversationHistory.length > MAX_HISTORY_MESSAGES_FALLBACK) {
+      // Fallback: if message count exceeds limit, keep last N messages
+      limitedHistory = conversationHistory.slice(-MAX_HISTORY_MESSAGES_FALLBACK);
+      console.log(`[RID:${requestId}] history_trimmed_by_count messages=${conversationHistory.length}->${limitedHistory.length}`);
+    }
+
     const messages = [
       { role: "system", content: systemPrompt },
-      ...conversationHistory,
+      ...limitedHistory,
       { role: "user", content: prompt }
     ];
     
-    // לוג כדי לבדוק שההיסטוריה נשלחת נכון ל-OpenAI
-    console.log(`[Streaming] Sending ${messages.length} messages to OpenAI (${conversationHistory.length} from history)`);
-    console.log(`[Streaming] Current topic: ${turn.activeTopic}, Phase: ${turn.nextState.phase}, DiagnosisOnly: ${turn.diagnosisOnly}`);
-    if (conversationHistory.length > 0) {
-      console.log(`[Streaming] Last 2 messages from history:`, conversationHistory.slice(-2).map(m => ({ role: m.role, content: m.content.substring(0, 100) })));
-    }
+    const systemPromptChars = systemPrompt.length;
+    const systemPromptTokens = estimateTokens(systemPrompt);
+    const historyTokensFinal = estimateMessagesTokens(limitedHistory);
+    const userPromptTokens = estimateTokens(prompt);
+    const totalEstimatedTokens = systemPromptTokens + historyTokensFinal + userPromptTokens;
+    
+    const promptSize = JSON.stringify(messages).length;
+    logPromptSize(requestId, promptSize, messages.length);
+    logPerformance(requestId, "prompt_breakdown", 0, {
+      system_chars: systemPromptChars,
+      system_tokens: systemPromptTokens,
+      history_messages: limitedHistory.length,
+      history_tokens: historyTokensFinal,
+      user_tokens: userPromptTokens,
+      total_estimated_tokens: totalEstimatedTokens
+    });
 
     // שמירת הודעת המשתמש ברקע (לא חוסם את התגובה)
+    // Cache updates happen AFTER successful writes (write-through cache)
+    const maxStoredMessages = parseInt(MAX_STORED_MESSAGES_PER_USER || "200", 10);
     if (chatMemoryEnabled) {
-      saveChatMessage(rawEmail, "user", prompt).catch((e) => {
+      saveChatMessage(rawEmail, "user", prompt).then(() => {
+        // Update history cache after successful write
+        updateHistoryCache(rawEmail, { role: "user", content: prompt }, maxStoredMessages);
+        console.log(`[Cache] history UPDATED after user message write`);
+      }).catch((e) => {
         if (e.code === 8 || e.message?.includes("Quota exceeded")) {
           console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
         }
       });
     }
-    
+
     // אם זה נושא חדש: במקום להזרים מהמודל (שקשה לאכוף בזמן אמת), מבצעים completion קצר,
     // מאמתים, ואז מזריםים ללקוח תשובה קצרה ומאובטחת.
     if (turn.diagnosisOnly) {
+      const openaiStartTime = Date.now();
       const completion = await openai.chat.completions.create({
         model: OPENAI_MODEL,
         messages: messages,
         temperature: 0.15,
         max_tokens: 140
       });
+      const ttft = Date.now() - openaiStartTime;
+      logPerformance(requestId, "openai_call", ttft);
+      logPerformance(requestId, "ttft", ttft); // Time to first token (for streaming, this is completion time)
+      
+      if (completion?.usage) {
+        logTokenUsage(requestId, completion.usage);
+      }
 
       let fullAnswer = completion?.choices?.[0]?.message?.content?.trim() || "";
       fullAnswer = cleanLaTeXFormulas(fullAnswer);
@@ -549,20 +904,32 @@ async function handleStreamingRequest(req, res) {
 
       // שמירת הודעת הבוט ומצב ברקע (לא חוסם את התגובה)
       if (chatMemoryEnabled && fullAnswer.trim()) {
-        saveChatMessage(rawEmail, "assistant", fullAnswer).catch((e) => {
+        saveChatMessage(rawEmail, "assistant", fullAnswer).then(() => {
+          // Update history cache after successful write
+          updateHistoryCache(rawEmail, { role: "assistant", content: fullAnswer }, maxStoredMessages);
+          console.log(`[Cache] history UPDATED after assistant message write`);
+        }).catch((e) => {
           if (e.code === 8 || e.message?.includes("Quota exceeded")) {
             console.warn("[ChatMemory] Firestore quota exceeded - skipping message save");
           }
         });
       }
-      saveUserState(db, turn.nextState);
+      saveUserState(db, turn.nextState).then((success) => {
+        // Update state cache after successful write
+        if (success) {
+          updateStateCache(rawEmail, turn.nextState);
+          console.log(`[Cache] state UPDATED after state write`);
+        }
+      });
 
+      logPerformance(requestId, "end", Date.now() - startTime);
       res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
       res.end();
       return;
     }
 
     // מצב רגיל: streaming כרגיל
+    const openaiStartTime = Date.now();
     const stream = await openai.chat.completions.create({
       model: OPENAI_MODEL,
       messages: messages,
@@ -572,16 +939,23 @@ async function handleStreamingRequest(req, res) {
     });
 
     let fullAnswer = "";
+    let firstTokenTime = null;
 
     for await (const chunk of stream) {
       if (res.destroyed || res.closed) break;
       const content = chunk.choices[0]?.delta?.content || "";
       if (content) {
+        if (firstTokenTime === null) {
+          firstTokenTime = Date.now() - openaiStartTime;
+          logPerformance(requestId, "ttft", firstTokenTime); // Time to first token
+        }
         fullAnswer += content;
         res.write(`data: ${JSON.stringify({ type: "token", content })}\n\n`);
         if (res.flush) res.flush();
       }
     }
+
+    logPerformance(requestId, "openai_call", Date.now() - openaiStartTime);
 
     fullAnswer = cleanLaTeXFormulas(fullAnswer);
 
@@ -591,14 +965,26 @@ async function handleStreamingRequest(req, res) {
 
     // שמירת הודעת הבוט ומצב ברקע (לא חוסם את התגובה)
     if (chatMemoryEnabled && fullAnswer.trim()) {
-      saveChatMessage(rawEmail, "assistant", fullAnswer).catch(() => {});
+      saveChatMessage(rawEmail, "assistant", fullAnswer).then(() => {
+        // Update history cache after successful write
+        updateHistoryCache(rawEmail, { role: "assistant", content: fullAnswer }, maxStoredMessages);
+        console.log(`[Cache] history UPDATED after assistant message write`);
+      }).catch(() => {});
     }
-    saveUserState(db, turn.nextState);
+    saveUserState(db, turn.nextState).then((success) => {
+      // Update state cache after successful write
+      if (success) {
+        updateStateCache(rawEmail, turn.nextState);
+        console.log(`[Cache] state UPDATED after state write`);
+      }
+    });
 
+    logPerformance(requestId, "end", Date.now() - startTime);
     res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
     res.end();
 
   } catch (e) {
+    logPerformance(requestId, "error", Date.now() - startTime, { error: e.message });
     console.error(e);
     res.write(`data: ${JSON.stringify({ type: "error", message: "Server error" })}\n\n`);
     res.end();
