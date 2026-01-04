@@ -257,7 +257,8 @@
         }
 
         // קריאה מ-rag_chunks. ה-Rules צריכים לאפשר read אחרי auth.
-        const snapshot = await db.collection("rag_chunks").limit(500).get();
+        // הקטנתי מ-500 ל-200 כדי להפחית קריאות ל-Firestore
+        const snapshot = await db.collection("rag_chunks").limit(200).get();
 
         if (snapshot.empty) {
           groupedRows = [];
@@ -351,11 +352,8 @@
         setStatus("✅ מחוברת ל-Firebase. טוען נתונים...", "success");
         loadData();
         
-        // רענון אוטומטי כל 30 שניות (במקום 5 שניות כדי לא להעמיס)
-        if (autoRefreshInterval) {
-          clearInterval(autoRefreshInterval);
-        }
-        autoRefreshInterval = setInterval(loadData, 30000);
+        // בוטלנו את ה-polling האוטומטי כדי להפחית קריאות ל-Firestore
+        // רענון רק ידני דרך כפתור "רענון"
       })
       .catch((err) => {
         console.error("Auth error:", err);

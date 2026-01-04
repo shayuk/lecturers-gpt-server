@@ -4,6 +4,47 @@ import OpenAI from "openai";
 let openaiEmbeddings = null;
 let firestoreDb = null;
 
+// Cache לשאילתות RAG - מפחית קריאות ל-Firestore
+const RAG_CACHE_TTL = 60000; // 60 שניות
+const ragCache = new Map(); // { cacheKey: { data, timestamp } }
+
+// יצירת מפתח cache לפי queryText ו-course_name
+function getCacheKey(queryText, courseName) {
+  return `${courseName || 'all'}_${queryText.substring(0, 50)}`;
+}
+
+// בדיקה אם יש cache תקף
+function getCachedResult(cacheKey) {
+  const cached = ragCache.get(cacheKey);
+  if (!cached) return null;
+  
+  const age = Date.now() - cached.timestamp;
+  if (age > RAG_CACHE_TTL) {
+    ragCache.delete(cacheKey);
+    return null;
+  }
+  
+  return cached.data;
+}
+
+// שמירה ב-cache
+function setCachedResult(cacheKey, data) {
+  ragCache.set(cacheKey, {
+    data: data,
+    timestamp: Date.now()
+  });
+  
+  // ניקוי cache ישן מדי פעם (אם יש יותר מ-100 entries)
+  if (ragCache.size > 100) {
+    const now = Date.now();
+    for (const [key, value] of ragCache.entries()) {
+      if (now - value.timestamp > RAG_CACHE_TTL) {
+        ragCache.delete(key);
+      }
+    }
+  }
+}
+
 // אתחול RAG עם Firestore
 export function initRAG(openaiApiKey, firestoreInstance) {
   if (!openaiApiKey) {
@@ -60,22 +101,39 @@ function cosineSimilarity(vecA, vecB) {
 }
 
 // שאילתה ב-RAG - מחזיר את הטקסטים הרלוונטיים ביותר
-export async function queryRAG(queryText, topK = 3) {
+export async function queryRAG(queryText, topK = 3, courseName = null, maxDocs = 200) {
   if (!firestoreDb || !openaiEmbeddings) {
     return { chunks: [], sources: [] };
   }
 
   try {
-    console.log(`[RAG] Querying for: "${queryText.substring(0, 50)}..."`);
+    // בדיקת cache
+    const cacheKey = getCacheKey(queryText, courseName);
+    const cached = getCachedResult(cacheKey);
+    if (cached) {
+      console.log(`[RAG] Cache hit for query: "${queryText.substring(0, 50)}..." (course: ${courseName || 'all'})`);
+      return cached;
+    }
+    
+    console.log(`[RAG] Querying for: "${queryText.substring(0, 50)}..." (course: ${courseName || 'all'}, maxDocs: ${maxDocs})`);
     
     // יצירת embedding לשאילתה
     const queryEmbedding = await createEmbedding(queryText);
     console.log(`[RAG] Created query embedding, dimension: ${queryEmbedding.length}`);
 
-    // קבלת כל ה-chunks מ-Firestore עם הגבלה קטנה יותר (100 במקום 200) כדי להפחית קריאות
-    // זה מפחית את מספר ה-reads מ-200 ל-100 לכל שאילתה
-    const chunksSnapshot = await firestoreDb.collection("rag_chunks").limit(100).get();
-    console.log(`[RAG] Found ${chunksSnapshot.size} chunks in database`);
+    // שאילתה ממוקדת לפי course_name אם קיים, אחרת limit בלבד
+    let query = firestoreDb.collection("rag_chunks");
+    
+    if (courseName) {
+      // סינון לפי course_name - מפחית דרמטית את מספר ה-reads
+      query = query.where("course_name", "==", courseName);
+    }
+    
+    // הגבלה למספר מקסימלי של מסמכים
+    query = query.limit(maxDocs);
+    
+    const chunksSnapshot = await query.get();
+    console.log(`[RAG] Found ${chunksSnapshot.size} chunks in database${courseName ? ` (filtered by course: ${courseName})` : ''}`);
     
     if (chunksSnapshot.empty) {
       console.warn("[RAG] No chunks found in database");
@@ -177,7 +235,13 @@ export async function queryRAG(queryText, topK = 3) {
     }
 
     console.log(`[RAG] Returning ${chunks.length} chunks after filtering (similarity > 0.05), ${sources.length} unique sources`);
-    return { chunks, sources };
+    
+    const result = { chunks, sources };
+    
+    // שמירה ב-cache
+    setCachedResult(cacheKey, result);
+    
+    return result;
   } catch (e) {
     console.error("[RAG Query Error]", e);
     // אם זו שגיאת quota, נחזיר מערך ריק כדי לא לחסום את התגובה
@@ -292,8 +356,8 @@ function splitTextIntoChunks(text, chunkSize = 500, overlap = 100) {
 }
 
 // שאילתה משולבת - מחזירה context מוכן ל-LLM
-export async function getRAGContext(queryText, topK = 3) {
-  const { chunks, sources } = await queryRAG(queryText, topK);
+export async function getRAGContext(queryText, topK = 3, courseName = null, maxDocs = 200) {
+  const { chunks, sources } = await queryRAG(queryText, topK, courseName, maxDocs);
 
   if (chunks.length === 0) {
     return null;

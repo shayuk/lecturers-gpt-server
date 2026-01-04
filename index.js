@@ -77,7 +77,8 @@ const {
   USE_RAG = "true",
   ENABLE_STREAMING = "true",
   MAX_HISTORY_MESSAGES = "20",
-  MAX_STORED_MESSAGES_PER_USER = "200"
+  MAX_STORED_MESSAGES_PER_USER = "200",
+  RAG_MAX_DOCS = "200"
 } = process.env;
 
 function normalizePrivateKey(raw) {
@@ -333,8 +334,12 @@ app.post("/api/ask", async (req, res) => {
     // גם אם יש quota exceeded, נדלג על RAG כדי לא להחמיר את הבעיה
     if (ragEnabled && !turn.diagnosisOnly) {
       try {
-        const ragPromise = getRAGContext(turn.ragQuery || prompt, 3); // הקטנתי מ-5 ל-3 כדי להפחית קריאות
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 3000)); // הוקטן מ-20 ל-3 שניות
+        // חילוץ course_name מה-context או ברירת מחדל "statistics"
+        const courseName = req.body?.course_name || "statistics";
+        const maxDocs = parseInt(RAG_MAX_DOCS || "200", 10);
+        
+        const ragPromise = getRAGContext(turn.ragQuery || prompt, 3, courseName, maxDocs);
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 3000));
         ragContext = await Promise.race([ragPromise, timeoutPromise]);
       } catch (e) {
         // אם יש שגיאת quota, נדלג על RAG לחלוטין
@@ -484,8 +489,12 @@ async function handleStreamingRequest(req, res) {
     // גם אם יש quota exceeded, נדלג על RAG כדי לא להחמיר את הבעיה
     if (ragEnabled && !turn.diagnosisOnly) {
       try {
-        const ragPromise = getRAGContext(turn.ragQuery || prompt, 3); // הקטנתי מ-5 ל-3 כדי להפחית קריאות
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 3000)); // הוקטן מ-5 ל-3 שניות
+        // חילוץ course_name מה-context או ברירת מחדל "statistics"
+        const courseName = req.body?.course_name || "statistics";
+        const maxDocs = parseInt(RAG_MAX_DOCS || "200", 10);
+        
+        const ragPromise = getRAGContext(turn.ragQuery || prompt, 3, courseName, maxDocs);
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("RAG timeout")), 3000));
         ragContext = await Promise.race([ragPromise, timeoutPromise]);
       } catch (e) {
         // אם יש שגיאת quota, נדלג על RAG לחלוטין
