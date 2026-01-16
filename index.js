@@ -106,6 +106,7 @@ function normalizePrivateKey(raw) {
 
 const allowedOrigins = [
   "https://lecturers-gpt-auth.web.app",
+  "https://lecturers-gpt-auth.firebaseapp.com",
   "https://shayuk.github.io"
 ];
 
